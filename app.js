@@ -478,9 +478,11 @@ function openSettingsModal() {
       <button class="btn btn-primary" id="cfgSaveBtn">저장하고 연결 테스트</button>
     </div>
     <div id="cfgTestResult" class="settings-result"></div>
+    <div id="kakaoSection"></div>
   `;
   document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
   document.getElementById('cfgSaveBtn').addEventListener('click', onSaveConfig);
+  renderKakaoSection();
   document.getElementById('cfgClearBtn').addEventListener('click', () => {
     saveConfig('', '');
     connStatus = 'demo';
@@ -515,6 +517,91 @@ async function onSaveConfig() {
     resultEl.className = 'settings-result err';
   }
   render();
+}
+
+/* ============================================================
+   카카오톡 알림 연결
+   ============================================================ */
+
+function gasUrl(action) {
+  const c = loadConfig();
+  return `${c.url}?action=${action}&key=${encodeURIComponent(c.key)}`;
+}
+
+async function renderKakaoSection() {
+  const el = document.getElementById('kakaoSection');
+  if (!el) return;
+  if (!isConfigured()) {
+    el.innerHTML = `<div class="kakao-box muted">GAS 웹앱을 먼저 연결하면 카톡 알림을 설정할 수 있어요.</div>`;
+    return;
+  }
+
+  el.innerHTML = `<div class="kakao-box muted">카톡 연결 상태 확인 중…</div>`;
+  let st;
+  try {
+    const res = await fetch(gasUrl('kakaoStatus'));
+    st = await res.json();
+    if (st.error) throw new Error(st.error);
+  } catch (err) {
+    el.innerHTML = `<div class="kakao-box muted">카톡 상태를 불러오지 못했어요. GAS를 최신 코드로 다시 배포했는지 확인해주세요.</div>`;
+    return;
+  }
+
+  if (!st.hasRestKey) {
+    el.innerHTML = `
+      <div class="kakao-box">
+        <div class="kakao-title">💬 카톡 알림</div>
+        <div class="kakao-desc">GAS 스크립트 속성에 <b>KAKAO_REST_KEY</b>를 먼저 저장해주세요. 카카오 개발자센터에서 앱을 만들고 REST API 키를 복사하면 됩니다.</div>
+      </div>`;
+    return;
+  }
+
+  if (!st.connected) {
+    el.innerHTML = `
+      <div class="kakao-box">
+        <div class="kakao-title">💬 카톡 알림</div>
+        <div class="kakao-desc">과도한 하락이나 선제 신호가 뜨면 카톡으로 보내드려요. 아래 버튼을 누르면 카카오 로그인 창이 열립니다.</div>
+        <div class="settings-actions">
+          <button class="btn btn-primary" id="kakaoConnectBtn">카톡 알림 연결</button>
+        </div>
+        <div class="kakao-desc" style="margin-top:10px">카카오 개발자센터의 Redirect URI에 아래 주소가 등록돼 있어야 해요.<br><code class="kakao-uri">${st.redirectUri}</code></div>
+      </div>`;
+    document.getElementById('kakaoConnectBtn').addEventListener('click', () => {
+      window.open(gasUrl('kakaoAuth'), '_blank');
+    });
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="kakao-box">
+      <div class="kakao-title">💬 카톡 알림 <span class="pill pill-up">연결됨</span></div>
+      <div class="kakao-desc">하락(${'-2.5'}% 이하)이나 선제 신호가 감지되면 알려드려요. 같은 날 같은 사유로는 중복 발송하지 않습니다.</div>
+      <div class="settings-actions">
+        <button class="btn btn-ghost" id="kakaoOffBtn">연결 해제</button>
+        <button class="btn btn-primary" id="kakaoTestBtn">테스트 발송</button>
+      </div>
+      <div id="kakaoResult" class="settings-result"></div>
+    </div>`;
+
+  document.getElementById('kakaoTestBtn').addEventListener('click', async () => {
+    const r = document.getElementById('kakaoResult');
+    r.textContent = '보내는 중…';
+    r.className = 'settings-result';
+    try {
+      const res = await fetch(gasUrl('kakaoTest'));
+      const data = await res.json();
+      r.textContent = data.ok ? '✅ 카톡을 확인해보세요.' : `❌ 실패: ${data.error}`;
+      r.className = data.ok ? 'settings-result ok' : 'settings-result err';
+    } catch (err) {
+      r.textContent = '❌ 요청에 실패했어요.';
+      r.className = 'settings-result err';
+    }
+  });
+
+  document.getElementById('kakaoOffBtn').addEventListener('click', async () => {
+    try { await fetch(gasUrl('kakaoOff')); } catch (err) { /* 무시하고 상태 갱신 */ }
+    renderKakaoSection();
+  });
 }
 
 /* ============================================================

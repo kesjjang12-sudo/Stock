@@ -24,6 +24,14 @@
 - 뉴스 언급량: 네이버 뉴스 검색 오픈API, 섹터별 대표 키워드로 최근 24시간 건수 집계 (Client ID/Secret 필요, 없으면 0건 처리)
 - 하락 이벤트: 섹터 평균 등락률이 `DROP_THRESHOLD_PCT`(-2.5%) 이하면 자동 로깅, outcome(반등 여부)은 28일 뒤 `backfillOutcomes`가 계산
 
+## 카카오톡 알림 (Code.gs 하단)
+- 스크립트 속성: `KAKAO_REST_KEY`(사용자 입력), `KAKAO_ACCESS_TOKEN` / `KAKAO_REFRESH_TOKEN` / `KAKAO_TOKEN_EXPIRES` / `KAKAO_ALERTS_ON`(자동 관리)
+- OAuth 콜백을 GAS 웹앱 자신이 처리한다(`action=kakaoCallback`). 카카오 서버는 secret을 붙일 수 없으므로 authorize 단계에서 발급한 1회용 `state`(UUID)로 검증 — 이 경로만 `SECRET_KEY` 검사를 우회하므로 수정 시 주의
+- 액세스 토큰 6시간 만료 → `kakaoAccessToken_()`이 만료 5분 전부터 리프레시 토큰으로 자동 재발급
+- 알림 중복 방지: `AlertLog` 시트에 `date|sectorId|type` 기록. 한 실행당 `MAX_ALERTS_PER_RUN`(3건) 상한이 있어 초과분은 다음 실행으로 이월된다
+- 카카오 텍스트 메시지 본문은 200자 제한 → `sendKakao_`가 195자로 자름
+- 수급 데이터 없는 섹터(빅테크)와 뉴스 기준선 미완 섹터는 signal 알림에서 제외, drop 알림은 발송
+
 ## 새 섹터/종목 추가 시
 1. `Code.gs`의 `SECTOR_CONFIG`에 kr/us 종목 추가 (US는 위 방법으로 reutersCode 먼저 확인)
 2. `app.js`의 `MOCK_SECTORS`에도 동일 구조로 추가 (연동 전 샘플 화면용)

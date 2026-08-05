@@ -325,6 +325,20 @@ body {
 }
 .btn-primary { background: var(--primary); color: #fff; }
 .btn-ghost { background: var(--card-alt); color: var(--text-sub); }
+.kakao-box {
+  margin-top: 18px; padding: 16px; border-radius: var(--radius-md);
+  background: var(--card-alt); border: 1px solid var(--border);
+}
+.kakao-box.muted { color: var(--text-sub); font-size: 12.5px; line-height: 1.5; }
+.kakao-title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.kakao-desc { margin-top: 8px; font-size: 12.5px; color: var(--text-sub); line-height: 1.55; }
+.kakao-uri {
+  display: block; margin-top: 6px; padding: 8px 10px; border-radius: 8px;
+  background: var(--card); border: 1px solid var(--border);
+  font-size: 11px; color: var(--text); word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .settings-result { margin-top: 12px; font-size: 13px; min-height: 18px; }
 .settings-result.ok { color: var(--up); font-weight: 700; }
 .settings-result.err { color: var(--danger); font-weight: 700; }

@@ -32,6 +32,11 @@ const DROP_THRESHOLD_PCT = -2.5;
 const REFRESH_INTERVAL_MIN = 10;
 const NEWS_BASELINE_DAYS = 7;
 
+// 자금과 뉴스의 "평소 대비 편차"가 이만큼(%p) 벌어지면 선제 신호로 본다 (프론트와 동일)
+const SIGNAL_THRESHOLD = 40;
+// 한 번 실행에서 보낼 수 있는 알림 개수 상한 (연동 직후 도배 방지)
+const MAX_ALERTS_PER_RUN = 3;
+
 const SECTOR_CONFIG = [
   {
     id: 'bigtech', name: '빅테크', icon: '💻', newsKeyword: '빅테크 주가',
@@ -110,17 +115,37 @@ const SECTOR_CONFIG = [
 
 function doGet(e) {
   const params = (e && e.parameter) || {};
+  const action = params.action || 'dashboard';
+
+  // 카카오 콜백은 카카오 서버가 호출하므로 secret을 붙일 수 없다.
+  // 대신 authorize 단계에서 발급한 1회용 state로 검증한다.
+  if (action === 'kakaoCallback') {
+    try { return handleKakaoCallback_(params); }
+    catch (err) { return htmlOut_('연결 실패', String(err)); }
+  }
+
   if (params.key !== SECRET_KEY) return jsonOut_({ error: 'unauthorized' });
 
-  const action = params.action || 'dashboard';
   try {
     if (action === 'ping') return jsonOut_({ ok: true, time: new Date().toISOString() });
     if (action === 'dashboard') return jsonOut_(getDashboard_());
     if (action === 'refresh') { refreshAll(); return jsonOut_(getDashboard_()); }
+    if (action === 'kakaoAuth') return startKakaoAuth_();
+    if (action === 'kakaoStatus') return jsonOut_(kakaoStatus_());
+    if (action === 'kakaoTest') return jsonOut_(kakaoTest_());
+    if (action === 'kakaoOff') return jsonOut_(kakaoDisconnect_());
     return jsonOut_({ error: 'unknown action: ' + action });
   } catch (err) {
     return jsonOut_({ error: String(err) });
   }
+}
+
+function htmlOut_(title, message) {
+  return HtmlService.createHtmlOutput(
+    '<div style="font-family:-apple-system,Segoe UI,Malgun Gothic,sans-serif;padding:40px 24px;text-align:center;color:#191F28">' +
+    '<div style="font-size:20px;font-weight:800;margin-bottom:10px">' + title + '</div>' +
+    '<div style="font-size:14px;color:#8B95A1;line-height:1.6">' + message + '</div></div>'
+  );
 }
 
 function jsonOut_(obj) {
@@ -167,6 +192,7 @@ function refreshAll() {
 
   logDailySectorPct_(ss, results);
   detectDropEvents_(ss, results);
+  checkAlerts_(ss, results);
 }
 
 /* 모든 종목의 시세/수급 요청을 한 번에 병렬 실행한다.
@@ -536,6 +562,240 @@ function getDashboard_() {
 
 function safeParseJson_(s, fallback) {
   try { return JSON.parse(s); } catch (e) { return fallback; }
+}
+
+/* ============================================================
+   카카오톡 "나에게 보내기" 알림
+   ============================================================
+   준비 (최초 1회):
+   1. developers.kakao.com → 애플리케이션 추가하기
+   2. [앱 설정 > 앱 키] REST API 키를 복사 →
+      GAS 스크립트 속성에 KAKAO_REST_KEY 로 저장
+   3. [제품 설정 > 카카오 로그인] 활성화 ON
+   4. GAS 함수 목록에서 showKakaoSetup 실행 → 로그에 찍히는 Redirect URI를
+      [카카오 로그인 > Redirect URI] 에 그대로 등록
+   5. [카카오 로그인 > 동의항목] 에서 "카카오톡 메시지 전송(talk_message)" 사용 설정
+   6. 대시보드 ⚙️ 설정 → "카톡 알림 연결" 클릭 → 카카오 로그인 → 끝
+
+   ※ 본인에게 보내는 "나에게 보내기"는 검수(심사) 없이 바로 됩니다.
+      다른 사람에게 보내려면 카카오 검수가 필요합니다.
+   ============================================================ */
+
+const K_REST = 'KAKAO_REST_KEY';
+const K_ACCESS = 'KAKAO_ACCESS_TOKEN';
+const K_REFRESH = 'KAKAO_REFRESH_TOKEN';
+const K_EXPIRES = 'KAKAO_TOKEN_EXPIRES';
+const K_STATE = 'KAKAO_AUTH_STATE';
+const K_ALERTS_ON = 'KAKAO_ALERTS_ON';
+
+/* 카카오에 등록해야 하는 Redirect URI를 확인하는 헬퍼. GAS 편집기에서 직접 실행. */
+function showKakaoSetup() {
+  const uri = redirectUri_();
+  Logger.log('카카오 개발자센터 > 카카오 로그인 > Redirect URI 에 아래 주소를 그대로 등록하세요:\n' + uri);
+  return uri;
+}
+
+function redirectUri_() {
+  return ScriptApp.getService().getUrl() + '?action=kakaoCallback';
+}
+
+function startKakaoAuth_() {
+  const restKey = PropertiesService.getScriptProperties().getProperty(K_REST);
+  if (!restKey) {
+    return htmlOut_('설정이 필요해요', 'GAS 스크립트 속성에 <b>KAKAO_REST_KEY</b> 를 먼저 저장해주세요.');
+  }
+  const state = Utilities.getUuid();
+  PropertiesService.getScriptProperties().setProperty(K_STATE, state);
+
+  const url = 'https://kauth.kakao.com/oauth/authorize'
+    + '?client_id=' + encodeURIComponent(restKey)
+    + '&redirect_uri=' + encodeURIComponent(redirectUri_())
+    + '&response_type=code'
+    + '&scope=talk_message'
+    + '&state=' + encodeURIComponent(state);
+
+  // GAS 웹앱은 iframe 안에서 열리므로 최상위 창을 이동시켜야 카카오 로그인이 뜬다
+  return HtmlService.createHtmlOutput(
+    '<script>window.top.location.href=' + JSON.stringify(url) + ';</script>' +
+    '<p style="font-family:sans-serif">카카오 로그인으로 이동 중… ' +
+    '<a href="' + url + '" target="_top">눌러서 계속하기</a></p>'
+  ).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function handleKakaoCallback_(params) {
+  const props = PropertiesService.getScriptProperties();
+  const expected = props.getProperty(K_STATE);
+
+  if (params.error) return htmlOut_('연결이 취소됐어요', String(params.error_description || params.error));
+  if (!expected || params.state !== expected) {
+    return htmlOut_('요청이 만료됐어요', '대시보드에서 "카톡 알림 연결"을 다시 눌러주세요.');
+  }
+  props.deleteProperty(K_STATE);
+
+  const restKey = props.getProperty(K_REST);
+  const res = UrlFetchApp.fetch('https://kauth.kakao.com/oauth/token', {
+    method: 'post',
+    muteHttpExceptions: true,
+    payload: {
+      grant_type: 'authorization_code',
+      client_id: restKey,
+      redirect_uri: redirectUri_(),
+      code: params.code,
+    },
+  });
+  const data = JSON.parse(res.getContentText());
+  if (!data.access_token) {
+    return htmlOut_('토큰 발급 실패', (data.error_description || res.getContentText()));
+  }
+
+  saveKakaoTokens_(data);
+  props.setProperty(K_ALERTS_ON, 'true');
+  sendKakao_('카톡 알림이 연결됐어요. 과도한 하락이나 선제 신호가 뜨면 여기로 알려드릴게요.');
+
+  return htmlOut_('연결 완료 ✅', '이제 창을 닫으셔도 됩니다. 방금 테스트 메시지를 보냈어요.');
+}
+
+function saveKakaoTokens_(data) {
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(K_ACCESS, data.access_token);
+  if (data.refresh_token) props.setProperty(K_REFRESH, data.refresh_token);
+  props.setProperty(K_EXPIRES, String(Date.now() + (Number(data.expires_in) || 3600) * 1000));
+}
+
+/* 액세스 토큰은 6시간짜리라 10분 트리거가 돌 때마다 만료를 확인하고 갱신한다. */
+function kakaoAccessToken_() {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty(K_ACCESS);
+  const expires = Number(props.getProperty(K_EXPIRES) || 0);
+  if (!token) return null;
+  if (Date.now() < expires - 5 * 60 * 1000) return token;
+
+  const refresh = props.getProperty(K_REFRESH);
+  if (!refresh) return null;
+  const res = UrlFetchApp.fetch('https://kauth.kakao.com/oauth/token', {
+    method: 'post',
+    muteHttpExceptions: true,
+    payload: {
+      grant_type: 'refresh_token',
+      client_id: props.getProperty(K_REST),
+      refresh_token: refresh,
+    },
+  });
+  const data = JSON.parse(res.getContentText());
+  if (!data.access_token) return null;
+  saveKakaoTokens_(data);
+  return data.access_token;
+}
+
+/* 카카오 텍스트 메시지는 본문 200자 제한이 있어 넘치면 잘라 보낸다. */
+function sendKakao_(text, linkUrl) {
+  const token = kakaoAccessToken_();
+  if (!token) return { ok: false, error: 'not_connected' };
+
+  const body = String(text).slice(0, 195);
+  const url = linkUrl || 'https://kesjjang12-sudo.github.io/Stock/';
+  const templateObject = {
+    object_type: 'text',
+    text: body,
+    link: { web_url: url, mobile_web_url: url },
+    button_title: '대시보드 열기',
+  };
+
+  try {
+    const res = UrlFetchApp.fetch('https://kapi.kakao.com/v2/api/talk/memo/default/send', {
+      method: 'post',
+      muteHttpExceptions: true,
+      headers: { Authorization: 'Bearer ' + token },
+      payload: { template_object: JSON.stringify(templateObject) },
+    });
+    const data = JSON.parse(res.getContentText() || '{}');
+    if (data.result_code === 0) return { ok: true };
+    return { ok: false, error: data.msg || res.getContentText() };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+function kakaoStatus_() {
+  const props = PropertiesService.getScriptProperties();
+  return {
+    hasRestKey: !!props.getProperty(K_REST),
+    connected: !!props.getProperty(K_REFRESH),
+    alertsOn: props.getProperty(K_ALERTS_ON) === 'true',
+    redirectUri: redirectUri_(),
+  };
+}
+
+function kakaoTest_() {
+  const r = sendKakao_('테스트 메시지예요. 이게 보이면 알림 연동이 정상입니다.');
+  return r.ok ? { ok: true } : { ok: false, error: r.error };
+}
+
+function kakaoDisconnect_() {
+  const props = PropertiesService.getScriptProperties();
+  [K_ACCESS, K_REFRESH, K_EXPIRES, K_ALERTS_ON].forEach((k) => props.deleteProperty(k));
+  return { ok: true };
+}
+
+/* ============================================================
+   알림 판단 — 같은 날 같은 사유로 두 번 보내지 않는다
+   ============================================================ */
+
+function checkAlerts_(ss, sectorResults) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty(K_ALERTS_ON) !== 'true') return;
+  if (!props.getProperty(K_REFRESH)) return;
+
+  const sheet = getOrCreateSheet_(ss, 'AlertLog', ['date', 'sectorId', 'type', 'sentAt', 'body']);
+  const today = todayStr_();
+  const sent = {};
+  sheet.getDataRange().getValues().slice(1).forEach((r) => {
+    if (r[0] === today) sent[r[1] + '|' + r[2]] = true;
+  });
+
+  const queue = [];
+
+  sectorResults.forEach((r) => {
+    if (r.avgChangePct <= DROP_THRESHOLD_PCT && !sent[r.id + '|drop']) {
+      const lines = ['📉 [' + r.name + '] ' + r.avgChangePct + '% 하락'];
+      if (hasFlow_(r)) lines.push('자금 평소 대비 ' + fmtSigned_(r.flowChangePct) + '%');
+      const headline = latestHeadline_(ss, today, r.id);
+      if (headline) lines.push(headline);
+      queue.push({ sectorId: r.id, type: 'drop', body: lines.join('\n') });
+    }
+
+    const divergence = +(r.flowChangePct - r.newsChangePct).toFixed(1);
+    if (hasFlow_(r) && r.newsBaselineReady && Math.abs(divergence) >= SIGNAL_THRESHOLD && !sent[r.id + '|signal']) {
+      queue.push({
+        sectorId: r.id, type: 'signal',
+        body: (divergence > 0 ? '📈' : '⚠️') + ' [' + r.name + '] 선제 신호 ' + (divergence > 0 ? '+' : '') + divergence + '%p\n'
+            + '자금 ' + fmtSigned_(r.flowChangePct) + '% / 뉴스 ' + fmtSigned_(r.newsChangePct) + '% (평소 대비)\n'
+            + '수급 기준일 ' + (r.flowDate || '-'),
+      });
+    }
+  });
+
+  queue.slice(0, MAX_ALERTS_PER_RUN).forEach((q) => {
+    const result = sendKakao_(q.body);
+    if (result.ok) sheet.appendRow([today, q.sectorId, q.type, new Date().toISOString(), q.body]);
+  });
+}
+
+function hasFlow_(r) {
+  return (r.stocks || []).some(function (s) { return s.flow != null; });
+}
+
+function fmtSigned_(n) {
+  return (n > 0 ? '+' : '') + n;
+}
+
+function latestHeadline_(ss, today, sectorId) {
+  const sheet = getOrCreateSheet_(ss, 'DropEvents', ['date', 'sectorId', 'sectorName', 'changePct', 'headline', 'tags', 'loggedAt']);
+  const rows = sheet.getDataRange().getValues().slice(1);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i][0] === today && rows[i][1] === sectorId) return String(rows[i][4] || '');
+  }
+  return '';
 }
 
 /* ============================================================

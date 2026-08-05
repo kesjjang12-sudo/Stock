@@ -156,6 +156,65 @@ function jsonOut_(obj) {
    트리거 설정 (최초 1회 수동 실행)
    ============================================================ */
 
+/* 최초 1회 실행용. 트리거를 걸고, 각 연동이 실제로 되는지 점검해서
+   무엇이 남았는지 로그로 알려준다. (보기 > 실행 로그) */
+function setup() {
+  const props = PropertiesService.getScriptProperties();
+  const out = [];
+
+  setupTrigger();
+  out.push('✅ 자동 갱신 트리거 등록됨 (' + REFRESH_INTERVAL_MIN + '분마다)');
+
+  const ss = getDb_();
+  out.push('✅ 데이터 시트 준비됨: ' + ss.getUrl());
+
+  // 수급/시세는 키가 필요 없으므로 바로 확인 가능
+  try {
+    const q = parseKrQuote_(UrlFetchApp.fetch(
+      'https://polling.finance.naver.com/api/realtime/domestic/stock/005930',
+      { muteHttpExceptions: true }).getContentText());
+    out.push(q ? '✅ 시세 연동 정상 (삼성전자 ' + q.changePct + '%)' : '❌ 시세 응답을 해석하지 못했습니다');
+  } catch (e) {
+    out.push('❌ 시세 연동 실패: ' + e);
+  }
+
+  try {
+    const h = parseKrFlowHistory_(UrlFetchApp.fetch(
+      'https://finance.naver.com/item/frgn.naver?code=005930&page=1',
+      { muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } }).getContentText());
+    out.push(h.length ? '✅ 수급 연동 정상 (' + h.length + '일치, 최신 ' + h[0].date + ')' : '❌ 수급 데이터를 읽지 못했습니다');
+  } catch (e) {
+    out.push('❌ 수급 연동 실패: ' + e);
+  }
+
+  if (props.getProperty('NAVER_CLIENT_ID') && props.getProperty('NAVER_CLIENT_SECRET')) {
+    const news = fetchNewsVolume_('반도체 업황');
+    out.push(news.count > 0
+      ? '✅ 뉴스 연동 정상 (최근 24시간 ' + news.count + '건)'
+      : '⚠️ 뉴스 키는 있으나 결과가 0건입니다. 키 값을 다시 확인해주세요.');
+  } else {
+    out.push('⬜ 뉴스 미연동 — 선제 신호 기능이 비활성화됩니다.');
+    out.push('   developers.naver.com 에서 검색 API 키를 받아 스크립트 속성에');
+    out.push('   NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 을 추가하면 켜집니다.');
+  }
+
+  let webAppUrl = '';
+  try { webAppUrl = ScriptApp.getService().getUrl(); } catch (e) { /* 미배포 상태 */ }
+  if (webAppUrl && webAppUrl.indexOf('/exec') > -1) {
+    out.push('✅ 웹앱 배포됨');
+    out.push('   대시보드 ⚙️ 에 넣을 주소: ' + webAppUrl);
+    out.push('   SECRET KEY: ' + SECRET_KEY);
+  } else {
+    out.push('⬜ 아직 웹앱으로 배포되지 않았습니다.');
+    out.push('   우측 상단 [배포] > [새 배포] > 유형 "웹 앱"');
+    out.push('   실행: 나 / 액세스 권한: 모든 사용자 > [배포]');
+  }
+
+  const msg = '\n===== 설정 점검 결과 =====\n' + out.join('\n') + '\n=========================';
+  Logger.log(msg);
+  return msg;
+}
+
 function setupTrigger() {
   ScriptApp.getProjectTriggers().forEach((t) => {
     const fn = t.getHandlerFunction();
@@ -571,7 +630,16 @@ function getDashboard_() {
     .sort((a, b) => (a.at < b.at ? 1 : -1))
     .slice(0, 30);
 
-  return { sectors: sectors, events: events, alerts: alerts, updatedAt: new Date().toISOString() };
+  const props = PropertiesService.getScriptProperties();
+  const newsEnabled = !!(props.getProperty('NAVER_CLIENT_ID') && props.getProperty('NAVER_CLIENT_SECRET'));
+
+  return {
+    sectors: sectors,
+    events: events,
+    alerts: alerts,
+    newsEnabled: newsEnabled,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function safeParseJson_(s, fallback) {

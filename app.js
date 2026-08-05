@@ -161,6 +161,7 @@ const SEEN_KEY = 'stock_seen_alerts';
 let SECTORS = MOCK_SECTORS;
 let EVENTS = MOCK_EVENTS;
 let ALERTS = MOCK_ALERTS;
+let newsEnabled = true;
 let currentPage = 'flow';
 let sortMode = 'flow'; // flow | change | news
 let connStatus = 'demo'; // demo | live | error | loading
@@ -362,9 +363,11 @@ function renderFlowPage(el) {
 
 function sectorCardHtml(s) {
   const flowAvailable = hasFlowData(s);
-  const newsLabel = s.newsBaselineReady
-    ? `뉴스 ${s.newsVolume}건 (평소 대비 ${fmtPct(s.newsChangePct)})`
-    : `뉴스 ${s.newsVolume}건 · 기준선 수집 중`;
+  const newsLabel = !newsEnabled
+    ? '뉴스 연동 안 됨 (네이버 API 키 필요)'
+    : s.newsBaselineReady
+      ? `뉴스 ${s.newsVolume}건 (평소 대비 ${fmtPct(s.newsChangePct)})`
+      : `뉴스 ${s.newsVolume}건 · 기준선 수집 중`;
 
   const headPill = flowAvailable
     ? `<span class="pill ${pillClass(s.flowChangePct)}">${arrow(s.flowChangePct)} ${fmtPct(s.flowChangePct)}</span>`
@@ -438,6 +441,23 @@ function eventCardHtml(ev) {
 }
 
 function renderSignalPage(el) {
+  // 선제 신호는 자금과 뉴스를 비교하는 지표라 뉴스 없이는 계산 자체가 불가능하다
+  if (!newsEnabled) {
+    el.innerHTML = `
+      <div class="section-title">선제 신호</div>
+      <div class="empty-state">
+        <div class="empty-icon">🔑</div>
+        <div style="font-weight:700;color:var(--text);margin-bottom:8px">뉴스 연동이 필요해요</div>
+        선제 신호는 <b>자금 흐름과 뉴스 언급량의 괴리</b>로 계산해서<br>
+        뉴스 데이터 없이는 만들 수 없어요.<br><br>
+        네이버 개발자센터에서 검색 API 키를 발급받아<br>
+        GAS 스크립트 속성에 <code>NAVER_CLIENT_ID</code>, <code>NAVER_CLIENT_SECRET</code>을<br>
+        추가하면 활성화됩니다.
+      </div>
+    `;
+    return;
+  }
+
   const signals = computeSignals();
   const skipped = SECTORS.filter((s) => !hasFlowData(s) || !s.newsBaselineReady);
   const skipNote = skipped.length
@@ -753,6 +773,7 @@ async function fetchDashboard() {
     SECTORS = data.sectors;
     EVENTS = data.events || [];
     ALERTS = data.alerts || [];
+    newsEnabled = data.newsEnabled !== false;
     lastUpdated = new Date();
     connStatus = 'live';
     localStorage.setItem(CACHE_KEY, JSON.stringify({ sectors: SECTORS, events: EVENTS, alerts: ALERTS, savedAt: lastUpdated.toISOString() }));

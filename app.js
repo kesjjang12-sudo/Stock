@@ -32,7 +32,7 @@ const MOCK_SECTORS = [
   {
     id: 'bigtech', name: '빅테크', icon: '💻',
     netFlow: 0, flowChangePct: 0, flowDate: '',
-    newsVolume: 128, newsChangePct: 14, newsBaselineReady: true,
+    newsVolume: 128, newsKr: 6, newsUs: 122, newsChangePct: 14, newsBaselineReady: true,
     stocks: [
       { ticker: 'AAPL', name: '애플', market: 'US', changePct: 1.2, flow: null },
       { ticker: 'MSFT', name: '마이크로소프트', market: 'US', changePct: 0.8, flow: null },
@@ -44,7 +44,7 @@ const MOCK_SECTORS = [
   {
     id: 'semi', name: '반도체', icon: '🔧',
     netFlow: -860, flowChangePct: -62.4, flowDate: MOCK_FLOW_DATE,
-    newsVolume: 96, newsChangePct: 41, newsBaselineReady: true,
+    newsVolume: 96, newsKr: 22, newsUs: 74, newsChangePct: 41, newsBaselineReady: true,
     stocks: [
       { ticker: 'NVDA', name: '엔비디아', market: 'US', changePct: -2.8, flow: null },
       { ticker: '005930', name: '삼성전자', market: 'KR', changePct: -1.1, flow: -180 },
@@ -56,7 +56,7 @@ const MOCK_SECTORS = [
   {
     id: 'software', name: '소프트웨어', icon: '🖥️',
     netFlow: 410, flowChangePct: 38.5, flowDate: MOCK_FLOW_DATE,
-    newsVolume: 54, newsChangePct: 6, newsBaselineReady: true,
+    newsVolume: 54, newsKr: 18, newsUs: 36, newsChangePct: 6, newsBaselineReady: true,
     stocks: [
       { ticker: 'CRM', name: '세일즈포스', market: 'US', changePct: 0.9, flow: null },
       { ticker: 'ORCL', name: '오라클', market: 'US', changePct: 1.1, flow: null },
@@ -68,7 +68,7 @@ const MOCK_SECTORS = [
   {
     id: 'finance', name: '금융', icon: '🏦',
     netFlow: 300, flowChangePct: 71.2, flowDate: MOCK_FLOW_DATE,
-    newsVolume: 38, newsChangePct: -12, newsBaselineReady: true,
+    newsVolume: 38, newsKr: 14, newsUs: 24, newsChangePct: -12, newsBaselineReady: true,
     stocks: [
       { ticker: 'JPM', name: 'JP모건', market: 'US', changePct: 0.4, flow: null },
       { ticker: '105560', name: 'KB금융', market: 'KR', changePct: 0.6, flow: 80 },
@@ -80,7 +80,7 @@ const MOCK_SECTORS = [
   {
     id: 'battery', name: '2차전지·에너지', icon: '🔋',
     netFlow: -520, flowChangePct: -45.8, flowDate: MOCK_FLOW_DATE,
-    newsVolume: 71, newsChangePct: 22, newsBaselineReady: true,
+    newsVolume: 71, newsKr: 26, newsUs: 45, newsChangePct: 22, newsBaselineReady: true,
     stocks: [
       { ticker: 'TSLA', name: '테슬라', market: 'US', changePct: -2.2, flow: null },
       { ticker: '373220', name: 'LG에너지솔루션', market: 'KR', changePct: -1.7, flow: -160 },
@@ -91,7 +91,7 @@ const MOCK_SECTORS = [
   {
     id: 'health', name: '헬스케어·바이오', icon: '🧬',
     netFlow: 260, flowChangePct: 24.6, flowDate: MOCK_FLOW_DATE,
-    newsVolume: 29, newsChangePct: 3, newsBaselineReady: true,
+    newsVolume: 29, newsKr: 9, newsUs: 20, newsChangePct: 3, newsBaselineReady: true,
     stocks: [
       { ticker: 'LLY', name: '일라이릴리', market: 'US', changePct: 1.3, flow: null },
       { ticker: '207940', name: '삼성바이오로직스', market: 'KR', changePct: 0.7, flow: 70 },
@@ -363,11 +363,12 @@ function renderFlowPage(el) {
 
 function sectorCardHtml(s) {
   const flowAvailable = hasFlowData(s);
-  const newsLabel = !newsEnabled
-    ? '뉴스 연동 안 됨 (네이버 API 키 필요)'
-    : s.newsBaselineReady
-      ? `뉴스 ${s.newsVolume}건 (평소 대비 ${fmtPct(s.newsChangePct)})`
-      : `뉴스 ${s.newsVolume}건 · 기준선 수집 중`;
+  const newsSplit = (s.newsKr != null && s.newsUs != null)
+    ? ` (국내 ${s.newsKr} · 해외 ${s.newsUs})`
+    : '';
+  const newsLabel = s.newsBaselineReady
+    ? `뉴스 ${s.newsVolume}건${newsSplit} · 평소 대비 ${fmtPct(s.newsChangePct)}`
+    : `뉴스 ${s.newsVolume}건${newsSplit} · 기준선 수집 중`;
 
   const headPill = flowAvailable
     ? `<span class="pill ${pillClass(s.flowChangePct)}">${arrow(s.flowChangePct)} ${fmtPct(s.flowChangePct)}</span>`
@@ -441,23 +442,6 @@ function eventCardHtml(ev) {
 }
 
 function renderSignalPage(el) {
-  // 선제 신호는 자금과 뉴스를 비교하는 지표라 뉴스 없이는 계산 자체가 불가능하다
-  if (!newsEnabled) {
-    el.innerHTML = `
-      <div class="section-title">선제 신호</div>
-      <div class="empty-state">
-        <div class="empty-icon">🔑</div>
-        <div style="font-weight:700;color:var(--text);margin-bottom:8px">뉴스 연동이 필요해요</div>
-        선제 신호는 <b>자금 흐름과 뉴스 언급량의 괴리</b>로 계산해서<br>
-        뉴스 데이터 없이는 만들 수 없어요.<br><br>
-        네이버 개발자센터에서 검색 API 키를 발급받아<br>
-        GAS 스크립트 속성에 <code>NAVER_CLIENT_ID</code>, <code>NAVER_CLIENT_SECRET</code>을<br>
-        추가하면 활성화됩니다.
-      </div>
-    `;
-    return;
-  }
-
   const signals = computeSignals();
   const skipped = SECTORS.filter((s) => !hasFlowData(s) || !s.newsBaselineReady);
   const skipNote = skipped.length

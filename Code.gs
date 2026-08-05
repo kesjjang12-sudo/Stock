@@ -1,26 +1,23 @@
 /**
  * 섹터 자금흐름 대시보드 — 백엔드 (Google Apps Script)
  * ============================================================
- * 배포 방법
+ * 배포 방법 (API 키 등록 불필요)
  * 1. script.google.com → 새 프로젝트 → 이 파일 내용을 Code.gs에 붙여넣기
- * 2. 프로젝트 설정(⚙️) → 스크립트 속성 → 다음 두 개 추가
- *      NAVER_CLIENT_ID     = 네이버 오픈API "검색" 애플리케이션 Client ID
- *      NAVER_CLIENT_SECRET = 같은 애플리케이션 Client Secret
- *    developers.naver.com → Application 등록 → 사용 API: "검색" 체크
- *    (뉴스 언급량 집계에만 쓰임. 비워두면 뉴스 없이 시세/수급만 동작)
- * 3. 아래 SECRET_KEY 값을 원하는 문자열로 바꾸고, 프론트(설정 모달)에도 같은 값을 입력
- * 4. 함수 목록에서 setupTrigger 선택 → 실행 (권한 승인 필요, 최초 1회)
- * 5. 배포 → 새 배포 → 유형: 웹앱 → 실행: 나 / 액세스 권한: 모든 사용자 → 배포
- *    → 생성된 웹앱 URL을 대시보드 설정(⚙️)에 입력
+ * 2. 배포 → 새 배포 → 유형: 웹 앱 → 실행: 나 / 액세스 권한: 모든 사용자 → 배포
+ * 3. 함수 목록에서 setup 선택 → 실행 (권한 승인 필요, 최초 1회)
+ *    → 실행 로그에 연동 점검 결과와 대시보드에 넣을 URL이 출력된다
+ * 4. 대시보드 ⚙️ 에 그 URL과 아래 SECRET_KEY 입력
  *
  * 데이터는 자동 생성되는 "StockDashboard_DB" 스프레드시트에 쌓인다.
  *
  * ── 데이터의 성격 (중요) ────────────────────────────────────
- * · 시세(changePct)   : 실시간(장중 갱신)
+ * · 시세(changePct)   : 실시간(장중 갱신). 네이버 금융.
  * · 수급(netFlow)     : 네이버가 확정 집계한 **직전 거래일** 기준. 장중 실시간 아님.
  *                       그래서 응답에 flowDate를 같이 내려보내 UI에 표기한다.
  * · 수급 대상         : 국내 상장 종목만. 미국 종목은 외국인/기관 순매매 공개 데이터가
  *                       없어 flow = null 이며 netFlow 합계에 포함되지 않는다.
+ * · 뉴스              : 구글뉴스 RSS. API 키가 필요 없고 한국어/영어를 따로 뽑는다.
+ *                       미국 종목은 영어 원문이 한국 언론 번역보다 몇 시간 빠르다.
  * · flowChangePct     : "직전 20거래일 대비 이번 수급이 얼마나 이례적인가"를
  *                       평균 절대 수급규모로 정규화한 값(%). 단순 전/후 비교가 아니다.
  * · newsChangePct     : 최근 24시간 언급량 vs 직전 7일 일평균. 기준선이 쌓이기 전
@@ -39,7 +36,8 @@ const MAX_ALERTS_PER_RUN = 3;
 
 const SECTOR_CONFIG = [
   {
-    id: 'bigtech', name: '빅테크', icon: '💻', newsKeyword: '빅테크 주가',
+    id: 'bigtech', name: '빅테크', icon: '💻',
+    newsQueryKr: '빅테크 주가', newsQueryUs: 'big tech stocks Nasdaq',
     kr: [],
     us: [
       { symbol: 'AAPL.O', name: '애플' },
@@ -50,7 +48,8 @@ const SECTOR_CONFIG = [
     ],
   },
   {
-    id: 'semi', name: '반도체', icon: '🔧', newsKeyword: '반도체 업황',
+    id: 'semi', name: '반도체', icon: '🔧',
+    newsQueryKr: '반도체 업황', newsQueryUs: 'semiconductor stocks chip sector',
     kr: [
       { code: '005930', name: '삼성전자' },
       { code: '000660', name: 'SK하이닉스' },
@@ -62,7 +61,8 @@ const SECTOR_CONFIG = [
     ],
   },
   {
-    id: 'software', name: '소프트웨어', icon: '🖥️', newsKeyword: '소프트웨어 업종',
+    id: 'software', name: '소프트웨어', icon: '🖥️',
+    newsQueryKr: '소프트웨어 업종 주가', newsQueryUs: 'enterprise software stocks cloud',
     kr: [
       { code: '035420', name: '네이버' },
       { code: '035720', name: '카카오' },
@@ -74,7 +74,8 @@ const SECTOR_CONFIG = [
     ],
   },
   {
-    id: 'finance', name: '금융', icon: '🏦', newsKeyword: '금융주 실적',
+    id: 'finance', name: '금융', icon: '🏦',
+    newsQueryKr: '금융주 실적', newsQueryUs: 'bank stocks financial sector',
     kr: [
       { code: '105560', name: 'KB금융' },
       { code: '055550', name: '신한지주' },
@@ -86,7 +87,8 @@ const SECTOR_CONFIG = [
     ],
   },
   {
-    id: 'battery', name: '2차전지·에너지', icon: '🔋', newsKeyword: '2차전지 업황',
+    id: 'battery', name: '2차전지·에너지', icon: '🔋',
+    newsQueryKr: '2차전지 업황', newsQueryUs: 'EV battery stocks clean energy',
     kr: [
       { code: '373220', name: 'LG에너지솔루션' },
       { code: '006400', name: '삼성SDI' },
@@ -97,7 +99,8 @@ const SECTOR_CONFIG = [
     ],
   },
   {
-    id: 'health', name: '헬스케어·바이오', icon: '🧬', newsKeyword: '제약 바이오 주가',
+    id: 'health', name: '헬스케어·바이오', icon: '🧬',
+    newsQueryKr: '제약 바이오 주가', newsQueryUs: 'healthcare pharma stocks',
     kr: [
       { code: '207940', name: '삼성바이오로직스' },
       { code: '068270', name: '셀트리온' },
@@ -187,15 +190,13 @@ function setup() {
     out.push('❌ 수급 연동 실패: ' + e);
   }
 
-  if (props.getProperty('NAVER_CLIENT_ID') && props.getProperty('NAVER_CLIENT_SECRET')) {
-    const news = fetchNewsVolume_('반도체 업황');
+  try {
+    const news = fetchNewsVolume_(SECTOR_CONFIG[1]); // 반도체
     out.push(news.count > 0
-      ? '✅ 뉴스 연동 정상 (최근 24시간 ' + news.count + '건)'
-      : '⚠️ 뉴스 키는 있으나 결과가 0건입니다. 키 값을 다시 확인해주세요.');
-  } else {
-    out.push('⬜ 뉴스 미연동 — 선제 신호 기능이 비활성화됩니다.');
-    out.push('   developers.naver.com 에서 검색 API 키를 받아 스크립트 속성에');
-    out.push('   NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 을 추가하면 켜집니다.');
+      ? '✅ 뉴스 연동 정상 (반도체 최근 24시간: 국내 ' + news.krCount + '건 / 해외 ' + news.usCount + '건)'
+      : '⚠️ 뉴스를 가져오지 못했습니다. 잠시 후 setup을 다시 실행해보세요.');
+  } catch (e) {
+    out.push('❌ 뉴스 연동 실패: ' + e);
   }
 
   let webAppUrl = '';
@@ -232,7 +233,7 @@ function setupTrigger() {
 const SECTOR_HEADERS = [
   'id', 'name', 'icon', 'netFlow', 'flowChangePct', 'flowDate',
   'avgChangePct', 'krChangePct', 'usChangePct',
-  'newsVolume', 'newsChangePct', 'newsBaselineReady', 'stocksJson', 'updatedAt',
+  'newsVolume', 'newsKr', 'newsUs', 'newsChangePct', 'newsBaselineReady', 'stocksJson', 'updatedAt',
 ];
 
 function refreshAll() {
@@ -245,7 +246,7 @@ function refreshAll() {
   writeRows_(sectorSheet, results.map((r) => [
     r.id, r.name, r.icon, r.netFlow, r.flowChangePct, r.flowDate,
     r.avgChangePct, r.krChangePct, r.usChangePct,
-    r.newsVolume, r.newsChangePct, r.newsBaselineReady,
+    r.newsVolume, r.newsKr, r.newsUs, r.newsChangePct, r.newsBaselineReady,
     JSON.stringify(r.stocks), new Date().toISOString(),
   ]));
 
@@ -336,7 +337,7 @@ function buildSectorSnapshot_(ss, sec, quotes) {
     ? clampPct_(((netFlow - priorMeanFlow) / priorMeanAbsFlow) * 100)
     : 0;
 
-  const news = fetchNewsVolume_(sec.newsKeyword);
+  const news = fetchNewsVolume_(sec);
   const newsBase = computeNewsChange_(ss, sec.id, news.count);
 
   const allPcts = krPcts.concat(usPcts);
@@ -349,6 +350,8 @@ function buildSectorSnapshot_(ss, sec, quotes) {
     krChangePct: mean_(krPcts),
     usChangePct: mean_(usPcts),
     newsVolume: news.count,
+    newsKr: news.krCount,
+    newsUs: news.usCount,
     newsChangePct: newsBase.changePct,
     newsBaselineReady: newsBase.ready,
     stocks,
@@ -424,29 +427,79 @@ function toNum_(s) {
    뉴스 언급량
    ============================================================ */
 
-function fetchNewsVolume_(keyword) {
-  const props = PropertiesService.getScriptProperties();
-  const clientId = props.getProperty('NAVER_CLIENT_ID');
-  const clientSecret = props.getProperty('NAVER_CLIENT_SECRET');
-  if (!clientId || !clientSecret) return { count: 0, items: [] };
+/* 구글뉴스 RSS를 쓴다. API 키가 필요 없고, 한국어(hl=ko)와 영어(hl=en) 양쪽을
+   같은 방식으로 뽑을 수 있다. 미국 종목은 영어 원문이 한국 언론 번역보다
+   몇 시간 빠르기 때문에 섹터마다 국내/해외 쿼리를 따로 둔다. */
+function googleNewsUrl_(query, lang) {
+  return lang === 'en'
+    ? 'https://news.google.com/rss/search?q=' + encodeURIComponent(query) + '&hl=en-US&gl=US&ceid=US:en'
+    : 'https://news.google.com/rss/search?q=' + encodeURIComponent(query) + '&hl=ko&gl=KR&ceid=KR:ko';
+}
 
-  try {
-    const url = 'https://openapi.naver.com/v1/search/news.json?query=' + encodeURIComponent(keyword) + '&display=100&sort=date';
-    const res = UrlFetchApp.fetch(url, {
-      muteHttpExceptions: true,
-      headers: { 'X-Naver-Client-Id': clientId, 'X-Naver-Client-Secret': clientSecret },
-    });
-    const data = JSON.parse(res.getContentText());
-    const items = data.items || [];
-    const now = Date.now();
-    const within24h = items.filter((it) => now - new Date(it.pubDate).getTime() <= 24 * 60 * 60 * 1000);
+function parseRssItems_(xml) {
+  const items = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+  return items.map((raw) => {
+    const t = raw.match(/<title>([\s\S]*?)<\/title>/);
+    const d = raw.match(/<pubDate>([\s\S]*?)<\/pubDate>/);
+    const l = raw.match(/<link>([\s\S]*?)<\/link>/);
     return {
-      count: within24h.length,
-      items: within24h.slice(0, 5).map((it) => ({ title: stripTags_(it.title), link: it.link, pubDate: it.pubDate })),
+      title: t ? cleanHeadline_(t[1]) : '',
+      pubDate: d ? d[1].trim() : '',
+      link: l ? l[1].trim() : '',
     };
+  }).filter((it) => it.title);
+}
+
+/* 구글뉴스 제목은 "기사제목 - 매체명" 형태이고 HTML 엔티티가 섞여 있다. */
+function cleanHeadline_(s) {
+  let out = String(s).replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+  out = out.replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+           .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  out = out.replace(/<[^>]+>/g, '');
+  return out.replace(/\s+-\s+[^-]{2,30}$/, '').trim();
+}
+
+function countWithin24h_(items) {
+  const now = Date.now();
+  return items.filter((it) => {
+    const t = new Date(it.pubDate).getTime();
+    return isFinite(t) && now - t <= 24 * 60 * 60 * 1000;
+  });
+}
+
+/* 국내/해외 피드를 각각 받아 24시간 건수를 합산한다. */
+function fetchNewsVolume_(sec) {
+  const queries = [];
+  if (sec.newsQueryKr) queries.push({ url: googleNewsUrl_(sec.newsQueryKr, 'ko'), lang: 'ko' });
+  if (sec.newsQueryUs) queries.push({ url: googleNewsUrl_(sec.newsQueryUs, 'en'), lang: 'en' });
+  if (!queries.length) return { count: 0, krCount: 0, usCount: 0, items: [] };
+
+  let responses;
+  try {
+    responses = UrlFetchApp.fetchAll(queries.map((q) => ({ url: q.url, muteHttpExceptions: true })));
   } catch (e) {
-    return { count: 0, items: [] };
+    return { count: 0, krCount: 0, usCount: 0, items: [] };
   }
+
+  let krCount = 0;
+  let usCount = 0;
+  let recent = [];
+  responses.forEach((res, i) => {
+    if (!res) return;
+    try {
+      const fresh = countWithin24h_(parseRssItems_(res.getContentText()));
+      if (queries[i].lang === 'ko') krCount = fresh.length; else usCount = fresh.length;
+      recent = recent.concat(fresh);
+    } catch (e) { /* 한쪽 피드 실패는 무시 */ }
+  });
+
+  recent.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+  return {
+    count: krCount + usCount,
+    krCount: krCount,
+    usCount: usCount,
+    items: recent.slice(0, 5),
+  };
 }
 
 function stripTags_(s) {
@@ -493,7 +546,7 @@ function detectDropEvents_(ss, sectorResults) {
       return;
     }
 
-    const news = fetchNewsVolume_(secCfg.newsKeyword);
+    const news = fetchNewsVolume_(secCfg);
     const headline = news.items && news.items[0]
       ? news.items[0].title
       : '(헤드라인 수집 실패 — 네이버 API 키 설정을 확인하세요)';
@@ -591,6 +644,8 @@ function getDashboard_() {
       krChangePct: Number(o.krChangePct) || 0,
       usChangePct: Number(o.usChangePct) || 0,
       newsVolume: Number(o.newsVolume) || 0,
+      newsKr: Number(o.newsKr) || 0,
+      newsUs: Number(o.newsUs) || 0,
       newsChangePct: Number(o.newsChangePct) || 0,
       newsBaselineReady: o.newsBaselineReady === true || o.newsBaselineReady === 'TRUE',
       stocks: safeParseJson_(o.stocksJson, []),
@@ -630,14 +685,11 @@ function getDashboard_() {
     .sort((a, b) => (a.at < b.at ? 1 : -1))
     .slice(0, 30);
 
-  const props = PropertiesService.getScriptProperties();
-  const newsEnabled = !!(props.getProperty('NAVER_CLIENT_ID') && props.getProperty('NAVER_CLIENT_SECRET'));
-
   return {
     sectors: sectors,
     events: events,
     alerts: alerts,
-    newsEnabled: newsEnabled,
+    newsEnabled: true, // 구글뉴스 RSS는 키가 필요 없어 항상 동작한다
     updatedAt: new Date().toISOString(),
   };
 }

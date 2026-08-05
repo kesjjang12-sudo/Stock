@@ -21,7 +21,9 @@
 - KR 실시간 시세: `https://polling.finance.naver.com/api/realtime/domestic/stock/{code}`
 - US 실시간 시세: `https://api.stock.naver.com/stock/{reutersCode}/basic` (reutersCode는 `https://ac.stock.naver.com/ac?q={심볼}&target=stock` 검색 결과의 `reutersCode` 필드 사용 — NASDAQ는 보통 `.O`, 일부 NYSE는 접미사 없음/`.K`, 티커마다 다르므로 새 종목 추가 시 반드시 이 검색으로 확인)
 - KR 수급(외국인/기관): `https://finance.naver.com/item/frgn.naver?code={code}` HTML 파싱 (정규식, `Code.gs`의 `fetchKrFlow_` 참고) — 미국 종목은 이런 공개 수급 데이터 자체가 없어 `flow: null`
-- 뉴스 언급량: 네이버 뉴스 검색 오픈API, 섹터별 대표 키워드로 최근 24시간 건수 집계 (Client ID/Secret 필요, 없으면 0건 처리)
+- 뉴스 언급량: **구글뉴스 RSS** (`news.google.com/rss/search`). API 키 불필요. 섹터마다 `newsQueryKr`(hl=ko) / `newsQueryUs`(hl=en) 두 쿼리를 `fetchAll`로 받아 최근 24시간 건수를 합산하고 `newsKr`/`newsUs`로 나눠 저장
+  - 제목은 `"기사제목 - 매체명"` 형태에 HTML 엔티티가 섞여 있어 `cleanHeadline_`으로 정리
+  - 네이버 뉴스 검색 API는 키 등록이 필요하고 한국어만 나와서 걷어냈다. 네이버 뉴스 *검색 페이지* 스크래핑은 클래스명이 난독화돼 있어(`sds-comps-*`) 불가
 - 하락 이벤트: 섹터 평균 등락률이 `DROP_THRESHOLD_PCT`(-2.5%) 이하면 자동 로깅, outcome(반등 여부)은 28일 뒤 `backfillOutcomes`가 계산
 
 ## 알림 (웹 우선)

@@ -44,6 +44,14 @@
 - 카카오 텍스트 메시지 본문은 200자 제한 → `sendKakao_`가 195자로 자름
 - 수급 데이터 없는 섹터(빅테크)와 뉴스 기준선 미완 섹터는 signal 알림에서 제외, drop 알림은 발송
 
+## 국장/미장 분리 (프론트 전용)
+백엔드는 한 섹터에 KR·US 종목을 함께 담아 내려준다. 분리는 `app.js`의 `viewSectors()`가 담당한다 — `marketFilter`(`all`|`kr`|`us`, localStorage `stock_market_filter`)에 따라 `stocks`를 시장별로 거르고 `netFlow`/`avgChangePct`/`newsVolume`을 다시 집계한 **파생 배열**을 만든다. 원본 `SECTORS`는 절대 건드리지 않는다(캐시/flash 비교가 원본 기준).
+- 렌더 함수는 `SECTORS`가 아니라 `viewSectors()`를 참조해야 한다 (`sortedSectors`, `computeSignals`, `renderSignalPage`, `openSectorDetail`)
+- 미장은 수급 공개 데이터가 없다 → 카드 대표 숫자가 평균 등락률로 바뀌고, 정렬은 `등락률순|뉴스언급순`만(`availableSortModes`), 선제 신호 탭은 안내 문구로 대체
+- 해당 시장 종목이 0개인 섹터는 목록에서 제외 (국장 탭의 빅테크 등)
+- 뉴스 건수는 `newsKr`/`newsUs`로 갈라지지만 `newsChangePct`(평소 대비)는 섹터 전체 기준 하나뿐 — 시장별로 나뉘지 않는다
+- 알림·하락 히스토리는 시장 구분이 없는 데이터라 세그먼트를 `hidden`으로 숨긴다 → `.market-seg[hidden] { display: none; }` 규칙 필수 (`.tab-badge`와 같은 이유)
+
 ## 새 섹터/종목 추가 시
 1. `Code.gs`의 `SECTOR_CONFIG`에 kr/us 종목 추가 (US는 위 방법으로 reutersCode 먼저 확인)
 2. `app.js`의 `MOCK_SECTORS`에도 동일 구조로 추가 (연동 전 샘플 화면용)

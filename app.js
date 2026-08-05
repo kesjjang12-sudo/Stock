@@ -168,6 +168,11 @@ let connStatus = 'demo'; // demo | live | error | loading
 let lastUpdated = new Date();
 let flashIds = new Set();
 
+const MARKET_KEY = 'stock_market_filter';
+let marketFilter = localStorage.getItem(MARKET_KEY) || 'all'; // all | kr | us
+
+const MARKET_LABEL = { all: '전체', kr: '국장', us: '미장' };
+
 /* ============================================================
    유틸
    ============================================================ */
@@ -202,21 +207,63 @@ function hasFlowData(s) {
    자금은 크게 움직이는데 뉴스가 아직 조용하면 divergence가 커진다. */
 const SIGNAL_THRESHOLD = 40;
 
-function computeSignals() {
+/* 백엔드는 한 섹터에 국내·미국 종목을 함께 담아 내려준다.
+   국장/미장 탭은 그 종목 배열을 시장별로 갈라서 지표를 다시 집계한 뷰다.
+   원본 SECTORS는 건드리지 않으므로 탭을 바꿔도 원 데이터는 그대로 남는다. */
+function viewSectors() {
+  if (marketFilter === 'all') return SECTORS;
+  const mk = marketFilter === 'kr' ? 'KR' : 'US';
   return SECTORS
+    .map((s) => {
+      const stocks = (s.stocks || []).filter((st) => st.market === mk);
+      if (!stocks.length) return null;
+      const isKr = mk === 'KR';
+      return {
+        ...s,
+        stocks,
+        netFlow: isKr ? stocks.reduce((a, st) => a + (st.flow || 0), 0) : 0,
+        flowChangePct: isKr ? s.flowChangePct : 0,
+        avgChangePct: +(stocks.reduce((a, st) => a + st.changePct, 0) / stocks.length).toFixed(2),
+        newsVolume: (isKr ? s.newsKr : s.newsUs) != null ? (isKr ? s.newsKr : s.newsUs) : s.newsVolume,
+      };
+    })
+    .filter(Boolean);
+}
+
+function computeSignals() {
+  return viewSectors()
     .filter((s) => hasFlowData(s) && s.newsBaselineReady)
     .map((s) => ({ ...s, divergence: +(s.flowChangePct - s.newsChangePct).toFixed(1) }))
     .filter((s) => Math.abs(s.divergence) >= SIGNAL_THRESHOLD)
     .sort((a, b) => Math.abs(b.divergence) - Math.abs(a.divergence));
 }
 
+function avgChangeOf(s) {
+  if (s.avgChangePct != null) return s.avgChangePct;
+  const list = s.stocks || [];
+  if (!list.length) return 0;
+  return list.reduce((a, st) => a + st.changePct, 0) / list.length;
+}
+
+/* 미장은 외국인·기관 수급 공개 데이터가 없어 자금 기준 정렬이 무의미하다 */
+function availableSortModes() {
+  return marketFilter === 'us' ? ['price', 'news'] : ['flow', 'change', 'price', 'news'];
+}
+
+function effectiveSortMode() {
+  const modes = availableSortModes();
+  return modes.includes(sortMode) ? sortMode : modes[0];
+}
+
 function sortedSectors() {
-  const arr = [...SECTORS];
+  const arr = viewSectors().slice();
+  const mode = effectiveSortMode();
   // 수급 데이터가 없는 섹터는 자금 기준 정렬에서 항상 뒤로 보낸다
   const flowRank = (s) => (hasFlowData(s) ? 0 : 1);
-  if (sortMode === 'flow') arr.sort((a, b) => flowRank(a) - flowRank(b) || b.netFlow - a.netFlow);
-  else if (sortMode === 'change') arr.sort((a, b) => flowRank(a) - flowRank(b) || b.flowChangePct - a.flowChangePct);
-  else if (sortMode === 'news') arr.sort((a, b) => b.newsVolume - a.newsVolume);
+  if (mode === 'flow') arr.sort((a, b) => flowRank(a) - flowRank(b) || b.netFlow - a.netFlow);
+  else if (mode === 'change') arr.sort((a, b) => flowRank(a) - flowRank(b) || b.flowChangePct - a.flowChangePct);
+  else if (mode === 'price') arr.sort((a, b) => avgChangeOf(b) - avgChangeOf(a));
+  else if (mode === 'news') arr.sort((a, b) => b.newsVolume - a.newsVolume);
   return arr;
 }
 
@@ -226,6 +273,8 @@ function sortedSectors() {
 
 function render() {
   renderStatusBanner();
+  // 알림/히스토리는 시장 구분이 없는 데이터라 세그먼트를 숨긴다
+  document.getElementById('marketSeg').hidden = (currentPage === 'alerts' || currentPage === 'history');
   const el = document.getElementById('pageContainer');
   el.innerHTML = '';
   if (currentPage === 'flow') renderFlowPage(el);
@@ -335,17 +384,27 @@ function renderStatusBanner() {
   if (link) link.addEventListener('click', openSettingsModal);
 }
 
+const SORT_LABEL = { flow: '자금유입순', change: '자금변화율순', price: '등락률순', news: '뉴스언급순' };
+
 function renderFlowPage(el) {
   const list = sortedSectors();
+  const mode = effectiveSortMode();
+  const title = marketFilter === 'us'
+    ? '🇺🇸 미장 섹터 — 등락률·뉴스 흐름'
+    : marketFilter === 'kr'
+      ? '🇰🇷 국장 섹터 — 외국인·기관 수급'
+      : '섹터별 자금흐름';
+  const usNote = marketFilter === 'us'
+    ? `<div class="signal-note">미국 시장은 외국인·기관 순매매 같은 공개 수급 데이터가 없어요. 등락률과 뉴스 언급량으로만 봅니다.</div>`
+    : '';
   el.innerHTML = `
     <div class="section-title-row">
-      <div class="section-title">섹터별 자금흐름</div>
+      <div class="section-title">${title}</div>
       <div class="sort-bar">
-        <button class="sort-btn ${sortMode === 'flow' ? 'active' : ''}" data-sort="flow">자금유입순</button>
-        <button class="sort-btn ${sortMode === 'change' ? 'active' : ''}" data-sort="change">변화율순</button>
-        <button class="sort-btn ${sortMode === 'news' ? 'active' : ''}" data-sort="news">뉴스언급순</button>
+        ${availableSortModes().map((m) => `<button class="sort-btn ${mode === m ? 'active' : ''}" data-sort="${m}">${SORT_LABEL[m]}</button>`).join('')}
       </div>
     </div>
+    ${usNote}
     <div class="sector-grid">
       ${list.map(sectorCardHtml).join('')}
     </div>
@@ -363,22 +422,31 @@ function renderFlowPage(el) {
 
 function sectorCardHtml(s) {
   const flowAvailable = hasFlowData(s);
-  const newsSplit = (s.newsKr != null && s.newsUs != null)
+  const priceView = marketFilter === 'us' || !flowAvailable;
+  const avg = avgChangeOf(s);
+  const newsSplit = (marketFilter === 'all' && s.newsKr != null && s.newsUs != null)
     ? ` (국내 ${s.newsKr} · 해외 ${s.newsUs})`
     : '';
-  const newsLabel = s.newsBaselineReady
-    ? `뉴스 ${s.newsVolume}건${newsSplit} · 평소 대비 ${fmtPct(s.newsChangePct)}`
-    : `뉴스 ${s.newsVolume}건${newsSplit} · 기준선 수집 중`;
+  const newsLabel = !s.newsBaselineReady
+    ? `뉴스 ${s.newsVolume}건${newsSplit} · 기준선 수집 중`
+    : marketFilter === 'us' && !flowAvailable
+      ? `뉴스 ${s.newsVolume}건${newsSplit}` // 평소 대비는 위 배지에 이미 있다
+      : `뉴스 ${s.newsVolume}건${newsSplit} · 평소 대비 ${fmtPct(s.newsChangePct)}`;
 
+  // 미장은 수급 자체가 없으므로 "수급 없음" 대신 뉴스 편차를 배지로 쓴다
   const headPill = flowAvailable
     ? `<span class="pill ${pillClass(s.flowChangePct)}">${arrow(s.flowChangePct)} ${fmtPct(s.flowChangePct)}</span>`
-    : `<span class="pill pill-neutral">수급 없음</span>`;
+    : marketFilter === 'us'
+      ? (s.newsBaselineReady
+          ? `<span class="pill ${pillClass(s.newsChangePct)}">뉴스 ${fmtPct(s.newsChangePct)}</span>`
+          : `<span class="pill pill-neutral">뉴스 기준선 수집중</span>`)
+      : `<span class="pill pill-neutral">수급 없음</span>`;
 
-  const amount = flowAvailable
-    ? `<div class="sector-flow-amt ${s.netFlow >= 0 ? 'val-up' : 'val-down'}">${fmtFlow(s.netFlow)}</div>
-       <div class="sector-flow-sub">외국인·기관 순매매${s.flowDate ? ` · ${s.flowDate} 확정` : ''}</div>`
-    : `<div class="sector-flow-amt sector-flow-na">—</div>
-       <div class="sector-flow-sub">국내 상장 종목이 없어 수급 공개 데이터가 없어요</div>`;
+  const amount = priceView
+    ? `<div class="sector-flow-amt ${avg >= 0 ? 'val-up' : 'val-down'}">${fmtPct(avg)}</div>
+       <div class="sector-flow-sub">${s.stocks.length}종목 평균 등락률 · 실시간</div>`
+    : `<div class="sector-flow-amt ${s.netFlow >= 0 ? 'val-up' : 'val-down'}">${fmtFlow(s.netFlow)}</div>
+       <div class="sector-flow-sub">외국인·기관 순매매${s.flowDate ? ` · ${s.flowDate} 확정` : ''}</div>`;
 
   return `
     <div class="sector-card ${flashIds.has(s.id) ? 'flash' : ''}" data-id="${s.id}">
@@ -391,7 +459,7 @@ function sectorCardHtml(s) {
       <div class="sector-stocks">
         ${s.stocks.slice(0, 3).map((st) => `
           <div class="mini-stock-row">
-            <span class="mini-stock-name"><b>${st.name}</b> ${st.market}</span>
+            <span class="mini-stock-name"><b>${st.name}</b>${marketFilter === 'all' ? ` ${st.market}` : ''}</span>
             <span class="${st.changePct >= 0 ? 'val-up' : 'val-down'}">${fmtPct(st.changePct)}</span>
           </div>
         `).join('')}
@@ -442,8 +510,19 @@ function eventCardHtml(ev) {
 }
 
 function renderSignalPage(el) {
+  if (marketFilter === 'us') {
+    el.innerHTML = `
+      <div class="section-title">선제 신호</div>
+      <div class="empty-state">
+        <div class="empty-icon">🇺🇸</div>
+        미장은 외국인·기관 수급 공개 데이터가 없어 자금-뉴스 괴리를 계산할 수 없어요.<br>선제 신호는 <b>국장</b> 탭에서 확인하세요.
+      </div>
+    `;
+    return;
+  }
+
   const signals = computeSignals();
-  const skipped = SECTORS.filter((s) => !hasFlowData(s) || !s.newsBaselineReady);
+  const skipped = viewSectors().filter((s) => !hasFlowData(s) || !s.newsBaselineReady);
   const skipNote = skipped.length
     ? `<div class="signal-note">${skipped.map((s) => s.name).join(', ')} — 수급 데이터가 없거나 뉴스 기준선이 아직 쌓이지 않아 신호 계산에서 제외했어요.</div>`
     : '';
@@ -499,29 +578,33 @@ function signalCardHtml(s) {
    ============================================================ */
 
 function openSectorDetail(id) {
-  const s = SECTORS.find((x) => x.id === id);
+  const s = viewSectors().find((x) => x.id === id);
   if (!s) return;
+  const showFlowCol = marketFilter !== 'us' && hasFlowData(s);
+  const marketTag = marketFilter === 'all' ? '' : ` <span class="pill pill-neutral">${MARKET_LABEL[marketFilter]}</span>`;
   const box = document.getElementById('modalBox');
   box.innerHTML = `
     <div class="modal-head">
-      <div class="modal-title"><span class="sector-icon">${s.icon}</span>${s.name}</div>
+      <div class="modal-title"><span class="sector-icon">${s.icon}</span>${s.name}${marketTag}</div>
       <button class="modal-close" id="modalCloseBtn">✕</button>
     </div>
     ${hasFlowData(s)
       ? `<span class="pill ${pillClass(s.netFlow)}">${fmtFlow(s.netFlow)} · 평소 대비 ${fmtPct(s.flowChangePct)}</span>
          <div class="modal-note">수급은 ${s.flowDate || '—'} 확정치예요. 등락률은 실시간이라 기준일이 다릅니다.</div>`
-      : `<span class="pill pill-neutral">수급 데이터 없음</span>
-         <div class="modal-note">국내 상장 종목이 없어 외국인·기관 순매매 공개 데이터가 없어요.</div>`}
+      : `<span class="pill ${pillClass(avgChangeOf(s))}">평균 ${fmtPct(avgChangeOf(s))}</span>
+         <div class="modal-note">${marketFilter === 'us'
+           ? '미국 시장은 외국인·기관 순매매 공개 데이터가 없어 등락률·뉴스로만 봅니다.'
+           : '국내 상장 종목이 없어 외국인·기관 순매매 공개 데이터가 없어요.'}</div>`}
     <table class="detail-stock-table">
       <thead>
-        <tr><th>종목</th><th>등락률</th><th>순매매(억)</th></tr>
+        <tr><th>종목</th><th>등락률</th>${showFlowCol ? '<th>순매매(억)</th>' : ''}</tr>
       </thead>
       <tbody>
         ${s.stocks.map((st) => `
           <tr>
-            <td>${st.name} <span style="color:var(--text-faint)">${st.market}</span></td>
+            <td>${st.name}${marketFilter === 'all' ? ` <span style="color:var(--text-faint)">${st.market}</span>` : ''}</td>
             <td class="${st.changePct >= 0 ? 'val-up' : 'val-down'}">${fmtPct(st.changePct)}</td>
-            <td class="${st.flow == null ? '' : (st.flow >= 0 ? 'val-up' : 'val-down')}">${st.flow == null ? '—' : fmtFlow(st.flow)}</td>
+            ${showFlowCol ? `<td class="${st.flow == null ? '' : (st.flow >= 0 ? 'val-up' : 'val-down')}">${st.flow == null ? '—' : fmtFlow(st.flow)}</td>` : ''}
           </tr>
         `).join('')}
       </tbody>
@@ -856,6 +939,16 @@ function init() {
       document.querySelectorAll('.tab-btn, .bottom-nav-btn').forEach((b) => b.classList.remove('active'));
       document.querySelectorAll(`[data-page="${btn.dataset.page}"]`).forEach((b) => b.classList.add('active'));
       currentPage = btn.dataset.page;
+      render();
+    });
+  });
+
+  document.querySelectorAll('.market-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.market === marketFilter);
+    btn.addEventListener('click', () => {
+      marketFilter = btn.dataset.market;
+      localStorage.setItem(MARKET_KEY, marketFilter);
+      document.querySelectorAll('.market-btn').forEach((b) => b.classList.toggle('active', b.dataset.market === marketFilter));
       render();
     });
   });

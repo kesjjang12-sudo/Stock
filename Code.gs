@@ -8,19 +8,29 @@
  *      NAVER_CLIENT_SECRET = 같은 애플리케이션 Client Secret
  *    developers.naver.com → Application 등록 → 사용 API: "검색" 체크
  *    (뉴스 언급량 집계에만 쓰임. 비워두면 뉴스 없이 시세/수급만 동작)
- * 3. 아래 SECRET_KEY 값을 원하는 문자열로 바꾸고, 프론트(app.js 설정 모달)에도 같은 값을 입력
+ * 3. 아래 SECRET_KEY 값을 원하는 문자열로 바꾸고, 프론트(설정 모달)에도 같은 값을 입력
  * 4. 함수 목록에서 setupTrigger 선택 → 실행 (권한 승인 필요, 최초 1회)
- *    → 10분마다 refreshAll() 자동 실행 + 매일 08:00 backfillOutcomes() 실행되는 트리거 등록됨
  * 5. 배포 → 새 배포 → 유형: 웹앱 → 실행: 나 / 액세스 권한: 모든 사용자 → 배포
  *    → 생성된 웹앱 URL을 대시보드 설정(⚙️)에 입력
  *
- * 데이터는 이 스크립트가 자동 생성하는 "StockDashboard_DB" 스프레드시트에 쌓인다.
- * (스프레드시트 ID는 스크립트 속성 DB_SHEET_ID에 저장되어 있음)
+ * 데이터는 자동 생성되는 "StockDashboard_DB" 스프레드시트에 쌓인다.
+ *
+ * ── 데이터의 성격 (중요) ────────────────────────────────────
+ * · 시세(changePct)   : 실시간(장중 갱신)
+ * · 수급(netFlow)     : 네이버가 확정 집계한 **직전 거래일** 기준. 장중 실시간 아님.
+ *                       그래서 응답에 flowDate를 같이 내려보내 UI에 표기한다.
+ * · 수급 대상         : 국내 상장 종목만. 미국 종목은 외국인/기관 순매매 공개 데이터가
+ *                       없어 flow = null 이며 netFlow 합계에 포함되지 않는다.
+ * · flowChangePct     : "직전 20거래일 대비 이번 수급이 얼마나 이례적인가"를
+ *                       평균 절대 수급규모로 정규화한 값(%). 단순 전/후 비교가 아니다.
+ * · newsChangePct     : 최근 24시간 언급량 vs 직전 7일 일평균. 기준선이 쌓이기 전
+ *                       (최초 2일)에는 0을 반환하고 newsBaselineReady=false로 표시.
  */
 
 const SECRET_KEY = 'stockflow-2026!';
 const DROP_THRESHOLD_PCT = -2.5;
 const REFRESH_INTERVAL_MIN = 10;
+const NEWS_BASELINE_DAYS = 7;
 
 const SECTOR_CONFIG = [
   {
@@ -132,68 +142,137 @@ function setupTrigger() {
 }
 
 /* ============================================================
-   메인 갱신 로직 — 시세/수급/뉴스 수집 → 시트 저장 → 하락 이벤트 감지
+   메인 갱신
    ============================================================ */
+
+const SECTOR_HEADERS = [
+  'id', 'name', 'icon', 'netFlow', 'flowChangePct', 'flowDate',
+  'avgChangePct', 'krChangePct', 'usChangePct',
+  'newsVolume', 'newsChangePct', 'newsBaselineReady', 'stocksJson', 'updatedAt',
+];
 
 function refreshAll() {
   const ss = getDb_();
-  const sectorSheet = getOrCreateSheet_(ss, 'SectorSnapshot', [
-    'id', 'name', 'icon', 'netFlow', 'prevNetFlow', 'flowChangePct',
-    'avgChangePct', 'newsVolume', 'prevNewsVolume', 'newsChangePct', 'stocksJson', 'updatedAt',
-  ]);
-  const prevRows = sheetToMap_(sectorSheet, 'id');
+  const quotes = fetchAllMarketData_();
 
-  const results = SECTOR_CONFIG.map((sec) => buildSectorSnapshot_(sec, prevRows[sec.id]));
+  const results = SECTOR_CONFIG.map((sec) => buildSectorSnapshot_(ss, sec, quotes));
 
+  const sectorSheet = getOrCreateSheet_(ss, 'SectorSnapshot', SECTOR_HEADERS);
   writeRows_(sectorSheet, results.map((r) => [
-    r.id, r.name, r.icon, r.netFlow, r.prevNetFlow, r.flowChangePct, r.avgChangePct,
-    r.newsVolume, r.prevNewsVolume, r.newsChangePct, JSON.stringify(r.stocks), new Date().toISOString(),
+    r.id, r.name, r.icon, r.netFlow, r.flowChangePct, r.flowDate,
+    r.avgChangePct, r.krChangePct, r.usChangePct,
+    r.newsVolume, r.newsChangePct, r.newsBaselineReady,
+    JSON.stringify(r.stocks), new Date().toISOString(),
   ]));
 
-  detectDropEvents_(ss, results);
   logDailySectorPct_(ss, results);
+  detectDropEvents_(ss, results);
 }
 
-function buildSectorSnapshot_(sec, prevRow) {
+/* 모든 종목의 시세/수급 요청을 한 번에 병렬 실행한다.
+   GAS는 실행시간 6분 제한이 있어 순차 fetch로는 종목이 늘어날수록 위험하다. */
+function fetchAllMarketData_() {
+  const reqs = [];
+  const meta = [];
+
+  SECTOR_CONFIG.forEach((sec) => {
+    sec.kr.forEach((s) => {
+      reqs.push({ url: 'https://polling.finance.naver.com/api/realtime/domestic/stock/' + s.code, muteHttpExceptions: true });
+      meta.push({ kind: 'krQuote', code: s.code });
+      reqs.push({ url: 'https://finance.naver.com/item/frgn.naver?code=' + s.code + '&page=1', muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } });
+      meta.push({ kind: 'krFlow', code: s.code });
+    });
+    sec.us.forEach((s) => {
+      reqs.push({ url: 'https://api.stock.naver.com/stock/' + s.symbol + '/basic', muteHttpExceptions: true });
+      meta.push({ kind: 'usQuote', code: s.symbol });
+    });
+  });
+
+  let responses;
+  try {
+    responses = UrlFetchApp.fetchAll(reqs);
+  } catch (err) {
+    responses = reqs.map(() => null);
+  }
+
+  const out = { krQuote: {}, krFlow: {}, usQuote: {} };
+  responses.forEach((res, i) => {
+    const m = meta[i];
+    if (!res) return;
+    try {
+      if (m.kind === 'krQuote') out.krQuote[m.code] = parseKrQuote_(res.getContentText());
+      else if (m.kind === 'usQuote') out.usQuote[m.code] = parseUsQuote_(res.getContentText());
+      else if (m.kind === 'krFlow') out.krFlow[m.code] = parseKrFlowHistory_(res.getContentText());
+    } catch (e) { /* 개별 종목 파싱 실패는 무시하고 나머지를 살린다 */ }
+  });
+  return out;
+}
+
+function buildSectorSnapshot_(ss, sec, quotes) {
   const stocks = [];
-  let flowSum = 0;
-  let changeSum = 0;
-  let changeCount = 0;
+  const krPcts = [];
+  const usPcts = [];
+
+  let netFlow = 0;
+  let priorMeanFlow = 0;
+  let priorMeanAbsFlow = 0;
+  let flowDate = '';
 
   sec.kr.forEach((s) => {
-    const rt = safeFetch_(() => fetchKrRealtime_(s.code));
-    const flow = safeFetch_(() => fetchKrFlow_(s.code));
-    const changePct = rt ? rt.changePct : 0;
-    const flowAmt = flow ? flow.flowKrw100M : 0;
-    stocks.push({ ticker: s.code, name: s.name, market: 'KR', changePct, flow: flowAmt });
-    flowSum += flowAmt;
-    changeSum += changePct;
-    changeCount++;
+    const q = quotes.krQuote[s.code];
+    const hist = quotes.krFlow[s.code];
+    const changePct = q ? q.changePct : 0;
+    let flow = null;
+
+    if (hist && hist.length) {
+      flow = hist[0].flow;
+      netFlow += flow;
+      const prior = hist.slice(1);
+      if (prior.length) {
+        priorMeanFlow += prior.reduce((a, h) => a + h.flow, 0) / prior.length;
+        priorMeanAbsFlow += prior.reduce((a, h) => a + Math.abs(h.flow), 0) / prior.length;
+      }
+      if (!flowDate || hist[0].date > flowDate) flowDate = hist[0].date;
+    }
+
+    stocks.push({ ticker: s.code, name: s.name, market: 'KR', changePct, flow });
+    krPcts.push(changePct);
   });
 
   sec.us.forEach((s) => {
-    const rt = safeFetch_(() => fetchUsRealtime_(s.symbol));
-    const changePct = rt ? rt.changePct : 0;
+    const q = quotes.usQuote[s.symbol];
+    const changePct = q ? q.changePct : 0;
     stocks.push({ ticker: s.symbol.replace(/\.[A-Z]$/, ''), name: s.name, market: 'US', changePct, flow: null });
-    changeSum += changePct;
-    changeCount++;
+    usPcts.push(changePct);
   });
 
-  const news = safeFetch_(() => fetchNewsVolume_(sec.newsKeyword)) || { count: 0 };
-  const prevNetFlow = prevRow ? Number(prevRow.netFlow) || 0 : 0;
-  const prevNewsVolume = prevRow ? Number(prevRow.newsVolume) || 0 : 0;
+  // 평소 수급 규모로 정규화한 이례도. 평균이 0 근처여도 폭주하지 않는다.
+  const flowChangePct = priorMeanAbsFlow > 0
+    ? clampPct_(((netFlow - priorMeanFlow) / priorMeanAbsFlow) * 100)
+    : 0;
 
-  const netFlow = flowSum;
-  const avgChangePct = changeCount ? +(changeSum / changeCount).toFixed(2) : 0;
-  const flowChangePct = prevNetFlow !== 0 ? clampPct_(((netFlow - prevNetFlow) / Math.abs(prevNetFlow)) * 100) : 0;
-  const newsChangePct = prevNewsVolume !== 0 ? clampPct_(((news.count - prevNewsVolume) / Math.abs(prevNewsVolume)) * 100) : 0;
+  const news = fetchNewsVolume_(sec.newsKeyword);
+  const newsBase = computeNewsChange_(ss, sec.id, news.count);
 
+  const allPcts = krPcts.concat(usPcts);
   return {
     id: sec.id, name: sec.name, icon: sec.icon,
-    netFlow: Math.round(netFlow), prevNetFlow: Math.round(prevNetFlow), flowChangePct,
-    avgChangePct, newsVolume: news.count, prevNewsVolume, newsChangePct,
+    netFlow: Math.round(netFlow),
+    flowChangePct,
+    flowDate,
+    avgChangePct: mean_(allPcts),
+    krChangePct: mean_(krPcts),
+    usChangePct: mean_(usPcts),
+    newsVolume: news.count,
+    newsChangePct: newsBase.changePct,
+    newsBaselineReady: newsBase.ready,
     stocks,
   };
+}
+
+function mean_(arr) {
+  if (!arr.length) return 0;
+  return +(arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(2);
 }
 
 function clampPct_(n) {
@@ -201,54 +280,55 @@ function clampPct_(n) {
   return Math.max(-300, Math.min(300, +n.toFixed(1)));
 }
 
-function safeFetch_(fn) {
-  try { return fn(); } catch (e) { return null; }
-}
-
 /* ============================================================
-   네이버 시세 (KR: 국내 실시간 시세 / US: 해외증시 실시간 시세)
+   파싱
    ============================================================ */
 
-function fetchKrRealtime_(code) {
-  const url = 'https://polling.finance.naver.com/api/realtime/domestic/stock/' + code;
-  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-  const data = JSON.parse(res.getContentText());
+function parseKrQuote_(text) {
+  const data = JSON.parse(text);
   const item = data.datas && data.datas[0];
   if (!item) return null;
-  const ratio = Math.abs(parseFloat(String(item.fluctuationsRatio || '0').replace(/,/g, '')));
-  const isDown = item.compareToPreviousPrice && String(item.compareToPreviousPrice.text || '').indexOf('하락') > -1;
-  return { changePct: +(isDown ? -ratio : ratio).toFixed(2), price: item.closePrice };
+  return { changePct: signedRatio_(item.fluctuationsRatio, item.compareToPreviousPrice), price: item.closePrice };
 }
 
-function fetchUsRealtime_(symbol) {
-  const url = 'https://api.stock.naver.com/stock/' + symbol + '/basic';
-  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-  const data = JSON.parse(res.getContentText());
+function parseUsQuote_(text) {
+  const data = JSON.parse(text);
   if (!data || data.code === 'StockConflict') return null;
-  const ratio = Math.abs(parseFloat(String(data.fluctuationsRatio || '0').replace(/,/g, '')));
-  const isDown = data.compareToPreviousPrice && String(data.compareToPreviousPrice.text || '').indexOf('하락') > -1;
-  return { changePct: +(isDown ? -ratio : ratio).toFixed(2), price: data.closePrice };
+  return { changePct: signedRatio_(data.fluctuationsRatio, data.compareToPreviousPrice), price: data.closePrice };
 }
 
-/* 외국인·기관 순매매 거래량(주) × 종가 로 순매매대금(억원)을 추정.
-   네이버 "매매동향" 페이지의 최신 거래일 행을 파싱한다. */
-function fetchKrFlow_(code) {
-  const url = 'https://finance.naver.com/item/frgn.naver?code=' + code + '&page=1';
-  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } });
-  const html = res.getContentText();
-  const rowMatch = html.match(/<tr onMouseOver="mouseOver\(this\)"[\s\S]*?<\/tr>/);
-  if (!rowMatch) return null;
-  const cells = [];
-  const cellRe = /class="tah p1[01][^"]*">\s*([^<]+?)\s*<\/span>/g;
-  let m;
-  while ((m = cellRe.exec(rowMatch[0])) !== null) cells.push(m[1].trim());
-  // [날짜, 종가, 전일비, 등락률, 거래량, 기관순매매량, 외국인순매매량, 외국인보유주수, 외국인보유율]
-  if (cells.length < 9) return null;
-  const closePrice = toNum_(cells[1]);
-  const orgNet = toNum_(cells[5]);
-  const frgnNet = toNum_(cells[6]);
-  const flowKrw100M = Math.round(((orgNet + frgnNet) * closePrice) / 100000000);
-  return { flowKrw100M, orgNet, frgnNet };
+/* 네이버는 등락률을 항상 양수로 주고 방향은 compareToPreviousPrice에 담아 보낸다. */
+function signedRatio_(ratioStr, compare) {
+  const ratio = Math.abs(parseFloat(String(ratioStr || '0').replace(/,/g, '')) || 0);
+  const isDown = compare && String(compare.text || '').indexOf('하락') > -1;
+  return +(isDown ? -ratio : ratio).toFixed(2);
+}
+
+/* 매매동향 페이지는 한 번 요청에 20거래일치를 준다 —
+   기준선 계산에 필요한 히스토리를 추가 요청 없이 여기서 다 얻는다.
+   반환: [{date, closePrice, orgNet, frgnNet, flow(억원)}] 최신일 우선 */
+function parseKrFlowHistory_(html) {
+  const rows = html.match(/<tr onMouseOver="mouseOver\(this\)"[\s\S]*?<\/tr>/g) || [];
+  const out = [];
+  rows.forEach((row) => {
+    const cells = [];
+    const cellRe = /class="tah p1[01][^"]*">\s*([^<]+?)\s*<\/span>/g;
+    let m;
+    while ((m = cellRe.exec(row)) !== null) cells.push(m[1].trim());
+    // [날짜, 종가, 전일비, 등락률, 거래량, 기관순매매량, 외국인순매매량, 외국인보유주수, 외국인보유율]
+    if (cells.length < 9) return;
+    const closePrice = toNum_(cells[1]);
+    const orgNet = toNum_(cells[5]);
+    const frgnNet = toNum_(cells[6]);
+    out.push({
+      date: cells[0].replace(/\./g, '-'),
+      closePrice: closePrice,
+      orgNet: orgNet,
+      frgnNet: frgnNet,
+      flow: Math.round(((orgNet + frgnNet) * closePrice) / 100000000),
+    });
+  });
+  return out;
 }
 
 function toNum_(s) {
@@ -256,7 +336,7 @@ function toNum_(s) {
 }
 
 /* ============================================================
-   네이버 뉴스 검색 API — 섹터 키워드별 24시간 언급량
+   뉴스 언급량
    ============================================================ */
 
 function fetchNewsVolume_(keyword) {
@@ -265,68 +345,112 @@ function fetchNewsVolume_(keyword) {
   const clientSecret = props.getProperty('NAVER_CLIENT_SECRET');
   if (!clientId || !clientSecret) return { count: 0, items: [] };
 
-  const url = 'https://openapi.naver.com/v1/search/news.json?query=' + encodeURIComponent(keyword) + '&display=100&sort=date';
-  const res = UrlFetchApp.fetch(url, {
-    muteHttpExceptions: true,
-    headers: { 'X-Naver-Client-Id': clientId, 'X-Naver-Client-Secret': clientSecret },
-  });
-  const data = JSON.parse(res.getContentText());
-  const items = data.items || [];
-  const now = Date.now();
-  const within24h = items.filter((it) => now - new Date(it.pubDate).getTime() <= 24 * 60 * 60 * 1000);
-  return {
-    count: within24h.length,
-    items: within24h.slice(0, 5).map((it) => ({ title: stripTags_(it.title), link: it.link, pubDate: it.pubDate })),
-  };
+  try {
+    const url = 'https://openapi.naver.com/v1/search/news.json?query=' + encodeURIComponent(keyword) + '&display=100&sort=date';
+    const res = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      headers: { 'X-Naver-Client-Id': clientId, 'X-Naver-Client-Secret': clientSecret },
+    });
+    const data = JSON.parse(res.getContentText());
+    const items = data.items || [];
+    const now = Date.now();
+    const within24h = items.filter((it) => now - new Date(it.pubDate).getTime() <= 24 * 60 * 60 * 1000);
+    return {
+      count: within24h.length,
+      items: within24h.slice(0, 5).map((it) => ({ title: stripTags_(it.title), link: it.link, pubDate: it.pubDate })),
+    };
+  } catch (e) {
+    return { count: 0, items: [] };
+  }
 }
 
 function stripTags_(s) {
-  return String(s).replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+  return String(s).replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+}
+
+/* 24시간 언급량을 직전 N일 일평균과 비교한다.
+   기준선이 쌓이기 전에는 억지로 숫자를 만들지 않고 ready=false로 알린다. */
+function computeNewsChange_(ss, sectorId, count) {
+  const sheet = getOrCreateSheet_(ss, 'NewsDailyLog', ['date', 'sectorId', 'count']);
+  const today = todayStr_();
+  const rows = sheet.getDataRange().getValues().slice(1);
+
+  upsertDailyRow_(sheet, rows, today, sectorId, 2, count);
+
+  const prior = rows.filter((r) => r[1] === sectorId && r[0] !== today).slice(-NEWS_BASELINE_DAYS);
+  if (prior.length < 2) return { changePct: 0, ready: false };
+
+  const avg = prior.reduce((a, r) => a + (Number(r[2]) || 0), 0) / prior.length;
+  if (avg <= 0) return { changePct: 0, ready: false };
+  return { changePct: clampPct_(((count - avg) / avg) * 100), ready: true };
 }
 
 /* ============================================================
-   하락 이벤트 자동 감지 (섹터 평균 등락률 <= DROP_THRESHOLD_PCT)
+   하락 이벤트 감지
    ============================================================ */
 
 function detectDropEvents_(ss, sectorResults) {
   const sheet = getOrCreateSheet_(ss, 'DropEvents', ['date', 'sectorId', 'sectorName', 'changePct', 'headline', 'tags', 'loggedAt']);
-  const today = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
+  const today = todayStr_();
   const existing = sheet.getDataRange().getValues().slice(1);
-  const alreadyLoggedToday = new Set(existing.filter((r) => r[0] === today).map((r) => r[1]));
+  const loggedToday = {};
+  existing.forEach((r, i) => { if (r[0] === today) loggedToday[r[1]] = i + 2; });
 
   sectorResults.forEach((r) => {
     if (r.avgChangePct > DROP_THRESHOLD_PCT) return;
-    if (alreadyLoggedToday.has(r.id)) return;
     const secCfg = SECTOR_CONFIG.find((s) => s.id === r.id);
-    const news = safeFetch_(() => fetchNewsVolume_(secCfg.newsKeyword));
-    const headline = news && news.items && news.items[0] ? news.items[0].title : '(뉴스 헤드라인 수집 실패 — 네이버 API 키 설정 확인)';
+    const rowIdx = loggedToday[r.id];
+
+    if (rowIdx) {
+      // 같은 날 더 깊이 빠졌으면 그날의 최저치로 갱신
+      const prevPct = Number(sheet.getRange(rowIdx, 4).getValue());
+      if (r.avgChangePct < prevPct) sheet.getRange(rowIdx, 4).setValue(r.avgChangePct);
+      return;
+    }
+
+    const news = fetchNewsVolume_(secCfg.newsKeyword);
+    const headline = news.items && news.items[0]
+      ? news.items[0].title
+      : '(헤드라인 수집 실패 — 네이버 API 키 설정을 확인하세요)';
     sheet.appendRow([today, r.id, r.name, r.avgChangePct, headline, JSON.stringify(deriveTags_(r)), new Date().toISOString()]);
   });
 }
 
 function deriveTags_(r) {
   const tags = [];
-  if (r.flowChangePct < 0) tags.push('수급 이탈');
-  if (r.newsChangePct > 20) tags.push('뉴스 급증');
+  if (r.flowChangePct < -30) tags.push('수급 이탈');
+  if (r.newsBaselineReady && r.newsChangePct > 50) tags.push('뉴스 급증');
+  if (r.krChangePct <= DROP_THRESHOLD_PCT && r.usChangePct > DROP_THRESHOLD_PCT) tags.push('국내 주도');
+  if (r.usChangePct <= DROP_THRESHOLD_PCT && r.krChangePct > DROP_THRESHOLD_PCT) tags.push('미국 주도');
   if (tags.length === 0) tags.push('단기 조정');
   return tags;
 }
 
 /* ============================================================
-   일별 로그 — 하락 이벤트 이후 반등/추가하락 여부(outcome) 계산용
+   일별 로그 / outcome
    ============================================================ */
 
+/* 하루 한 행을 유지하되 갱신될 때마다 최신값으로 덮어쓴다.
+   (예전 구현은 그날 첫 실행값만 남겨서 장 시작 직후의 0%에 가까운 값이 박혔다) */
 function logDailySectorPct_(ss, sectorResults) {
   const sheet = getOrCreateSheet_(ss, 'SectorDailyLog', ['date', 'sectorId', 'avgChangePct']);
-  const today = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
-  const existing = sheet.getDataRange().getValues().slice(1);
-  if (existing.some((r) => r[0] === today)) return; // 하루 한 번만 기록
-  sectorResults.forEach((r) => sheet.appendRow([today, r.id, r.avgChangePct]));
+  const today = todayStr_();
+  const rows = sheet.getDataRange().getValues().slice(1);
+  sectorResults.forEach((r) => upsertDailyRow_(sheet, rows, today, r.id, 2, r.avgChangePct));
 }
 
-/* 하락 이벤트 발생 후 약 20거래일(28일) 지나면 그 사이 누적 등락률을
-   outcome으로 계산해서 "돌아보면 매수 기회였는지" 판정한다.
-   backfillOutcomes 트리거(매일 08:00)가 자동으로 호출. */
+function upsertDailyRow_(sheet, rows, date, sectorId, valueColIdx, value) {
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i][0] === date && rows[i][1] === sectorId) {
+      sheet.getRange(i + 2, valueColIdx + 1).setValue(value);
+      rows[i][valueColIdx] = value;
+      return;
+    }
+  }
+  sheet.appendRow([date, sectorId, value]);
+  rows.push([date, sectorId, value]);
+}
+
 function backfillOutcomes() {
   const ss = getDb_();
   const eventSheet = getOrCreateSheet_(ss, 'DropEvents', ['date', 'sectorId', 'sectorName', 'changePct', 'headline', 'tags', 'loggedAt']);
@@ -334,41 +458,42 @@ function backfillOutcomes() {
   const logSheet = getOrCreateSheet_(ss, 'SectorDailyLog', ['date', 'sectorId', 'avgChangePct']);
 
   const events = eventSheet.getDataRange().getValues().slice(1);
-  const doneKeys = new Set(outcomeSheet.getDataRange().getValues().slice(1).map((r) => r[0] + '|' + r[1]));
+  const doneKeys = {};
+  outcomeSheet.getDataRange().getValues().slice(1).forEach((r) => { doneKeys[r[0] + '|' + r[1]] = true; });
   const logRows = logSheet.getDataRange().getValues().slice(1);
 
   events.forEach((ev) => {
-    const date = ev[0];
+    const date = String(ev[0]);
     const sectorId = ev[1];
-    const key = date + '|' + sectorId;
-    if (doneKeys.has(key)) return;
+    if (doneKeys[date + '|' + sectorId]) return;
 
     const eventDate = new Date(date);
     const daysSince = Math.floor((Date.now() - eventDate.getTime()) / (24 * 60 * 60 * 1000));
     if (daysSince < 28) return;
 
     const sectorLogs = logRows
-      .filter((r) => r[1] === sectorId && new Date(r[0]) >= eventDate)
-      .sort((a, b) => new Date(a[0]) - new Date(b[0]));
-    if (sectorLogs.length < 15) return; // 로그가 아직 부족하면 다음 실행에 재시도
+      .filter((r) => r[1] === sectorId && new Date(r[0]) > eventDate)
+      .sort((a, b) => new Date(a[0]) - new Date(b[0]))
+      .slice(0, 20);
+    if (sectorLogs.length < 15) return;
 
-    const cumPct = sectorLogs.slice(0, 20).reduce((sum, r) => sum + Number(r[2] || 0), 0);
+    // 일별 등락률은 복리로 누적해야 실제 수익률에 가깝다
+    const cum = sectorLogs.reduce((acc, r) => acc * (1 + (Number(r[2]) || 0) / 100), 1);
+    const cumPct = (cum - 1) * 100;
     outcomeSheet.appendRow([date, sectorId, +cumPct.toFixed(1), cumPct > 0, new Date().toISOString()]);
   });
 }
 
 /* ============================================================
-   조회용 조합 — 프론트가 호출하는 최종 JSON
+   조회용 조합
    ============================================================ */
 
 function getDashboard_() {
   const ss = getDb_();
-  const sectorSheet = getOrCreateSheet_(ss, 'SectorSnapshot', [
-    'id', 'name', 'icon', 'netFlow', 'prevNetFlow', 'flowChangePct',
-    'avgChangePct', 'newsVolume', 'prevNewsVolume', 'newsChangePct', 'stocksJson', 'updatedAt',
-  ]);
+  const sectorSheet = getOrCreateSheet_(ss, 'SectorSnapshot', SECTOR_HEADERS);
   const rows = sectorSheet.getDataRange().getValues();
   const headers = rows.shift();
+
   const sectors = rows.map((row) => {
     const o = {};
     headers.forEach((h, i) => (o[h] = row[i]));
@@ -376,8 +501,13 @@ function getDashboard_() {
       id: o.id, name: o.name, icon: o.icon,
       netFlow: Number(o.netFlow) || 0,
       flowChangePct: Number(o.flowChangePct) || 0,
+      flowDate: o.flowDate || '',
+      avgChangePct: Number(o.avgChangePct) || 0,
+      krChangePct: Number(o.krChangePct) || 0,
+      usChangePct: Number(o.usChangePct) || 0,
       newsVolume: Number(o.newsVolume) || 0,
       newsChangePct: Number(o.newsChangePct) || 0,
+      newsBaselineReady: o.newsBaselineReady === true || o.newsBaselineReady === 'TRUE',
       stocks: safeParseJson_(o.stocksJson, []),
     };
   });
@@ -386,14 +516,14 @@ function getDashboard_() {
   const outcomeSheet = getOrCreateSheet_(ss, 'DropOutcomes', ['date', 'sectorId', 'outcomePct', 'positive', 'computedAt']);
   const outcomeMap = {};
   outcomeSheet.getDataRange().getValues().slice(1).forEach((r) => {
-    outcomeMap[r[0] + '|' + r[1]] = { pct: r[2], positive: r[3] };
+    outcomeMap[r[0] + '|' + r[1]] = { pct: Number(r[2]), positive: r[3] === true || r[3] === 'TRUE' };
   });
 
   const events = eventSheet.getDataRange().getValues().slice(1)
     .map((r) => {
       const outcome = outcomeMap[r[0] + '|' + r[1]];
       return {
-        date: r[0], sector: r[2], changePct: Number(r[3]), headline: r[4],
+        date: String(r[0]), sector: r[2], changePct: Number(r[3]), headline: r[4],
         tags: safeParseJson_(r[5], []),
         outcome: outcome ? { days: 20, pct: outcome.pct, positive: outcome.positive } : null,
       };
@@ -401,7 +531,7 @@ function getDashboard_() {
     .sort((a, b) => (a.date < b.date ? 1 : -1))
     .slice(0, 20);
 
-  return { sectors, events, updatedAt: new Date().toISOString() };
+  return { sectors: sectors, events: events, updatedAt: new Date().toISOString() };
 }
 
 function safeParseJson_(s, fallback) {
@@ -412,11 +542,15 @@ function safeParseJson_(s, fallback) {
    시트 유틸
    ============================================================ */
 
+function todayStr_() {
+  return Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
+}
+
 function getDb_() {
   const props = PropertiesService.getScriptProperties();
   const id = props.getProperty('DB_SHEET_ID');
   if (id) {
-    try { return SpreadsheetApp.openById(id); } catch (e) { /* 삭제된 경우 재생성으로 진행 */ }
+    try { return SpreadsheetApp.openById(id); } catch (e) { /* 삭제된 경우 재생성 */ }
   }
   const ss = SpreadsheetApp.create('StockDashboard_DB');
   props.setProperty('DB_SHEET_ID', ss.getId());
@@ -428,21 +562,13 @@ function getOrCreateSheet_(ss, name, headers) {
   if (!sheet) {
     sheet = ss.insertSheet(name);
     sheet.appendRow(headers);
+    return sheet;
+  }
+  // 컬럼이 추가된 버전으로 업그레이드된 경우 헤더를 맞춰준다
+  if (sheet.getLastColumn() < headers.length) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   }
   return sheet;
-}
-
-function sheetToMap_(sheet, keyField) {
-  const rows = sheet.getDataRange().getValues();
-  const headers = rows.shift();
-  const keyIdx = headers.indexOf(keyField);
-  const map = {};
-  rows.forEach((row) => {
-    const o = {};
-    headers.forEach((h, i) => (o[h] = row[i]));
-    map[row[keyIdx]] = o;
-  });
-  return map;
 }
 
 function writeRows_(sheet, rows) {

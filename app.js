@@ -26,11 +26,13 @@ function isConfigured() {
    샘플(mock) 데이터 — 연결 전/실패 시 폴백으로 사용
    ============================================================ */
 
+const MOCK_FLOW_DATE = '2026-08-04';
+
 const MOCK_SECTORS = [
   {
     id: 'bigtech', name: '빅테크', icon: '💻',
-    netFlow: 1240, flowChangePct: 3.2,
-    newsVolume: 128, newsChangePct: 14,
+    netFlow: 0, flowChangePct: 0, flowDate: '',
+    newsVolume: 128, newsChangePct: 14, newsBaselineReady: true,
     stocks: [
       { ticker: 'AAPL', name: '애플', market: 'US', changePct: 1.2, flow: null },
       { ticker: 'MSFT', name: '마이크로소프트', market: 'US', changePct: 0.8, flow: null },
@@ -41,8 +43,8 @@ const MOCK_SECTORS = [
   },
   {
     id: 'semi', name: '반도체', icon: '🔧',
-    netFlow: -860, flowChangePct: -5.4,
-    newsVolume: 96, newsChangePct: 41,
+    netFlow: -860, flowChangePct: -62.4, flowDate: MOCK_FLOW_DATE,
+    newsVolume: 96, newsChangePct: 41, newsBaselineReady: true,
     stocks: [
       { ticker: 'NVDA', name: '엔비디아', market: 'US', changePct: -2.8, flow: null },
       { ticker: '005930', name: '삼성전자', market: 'KR', changePct: -1.1, flow: -180 },
@@ -53,8 +55,8 @@ const MOCK_SECTORS = [
   },
   {
     id: 'software', name: '소프트웨어', icon: '🖥️',
-    netFlow: 410, flowChangePct: 1.8,
-    newsVolume: 54, newsChangePct: 6,
+    netFlow: 410, flowChangePct: 38.5, flowDate: MOCK_FLOW_DATE,
+    newsVolume: 54, newsChangePct: 6, newsBaselineReady: true,
     stocks: [
       { ticker: 'CRM', name: '세일즈포스', market: 'US', changePct: 0.9, flow: null },
       { ticker: 'ORCL', name: '오라클', market: 'US', changePct: 1.1, flow: null },
@@ -65,8 +67,8 @@ const MOCK_SECTORS = [
   },
   {
     id: 'finance', name: '금융', icon: '🏦',
-    netFlow: 300, flowChangePct: 0.9,
-    newsVolume: 38, newsChangePct: -12,
+    netFlow: 300, flowChangePct: 71.2, flowDate: MOCK_FLOW_DATE,
+    newsVolume: 38, newsChangePct: -12, newsBaselineReady: true,
     stocks: [
       { ticker: 'JPM', name: 'JP모건', market: 'US', changePct: 0.4, flow: null },
       { ticker: '105560', name: 'KB금융', market: 'KR', changePct: 0.6, flow: 80 },
@@ -77,8 +79,8 @@ const MOCK_SECTORS = [
   },
   {
     id: 'battery', name: '2차전지·에너지', icon: '🔋',
-    netFlow: -520, flowChangePct: -3.9,
-    newsVolume: 71, newsChangePct: 22,
+    netFlow: -520, flowChangePct: -45.8, flowDate: MOCK_FLOW_DATE,
+    newsVolume: 71, newsChangePct: 22, newsBaselineReady: true,
     stocks: [
       { ticker: 'TSLA', name: '테슬라', market: 'US', changePct: -2.2, flow: null },
       { ticker: '373220', name: 'LG에너지솔루션', market: 'KR', changePct: -1.7, flow: -160 },
@@ -88,8 +90,8 @@ const MOCK_SECTORS = [
   },
   {
     id: 'health', name: '헬스케어·바이오', icon: '🧬',
-    netFlow: 260, flowChangePct: 2.4,
-    newsVolume: 29, newsChangePct: 3,
+    netFlow: 260, flowChangePct: 24.6, flowDate: MOCK_FLOW_DATE,
+    newsVolume: 29, newsChangePct: 3, newsBaselineReady: true,
     stocks: [
       { ticker: 'LLY', name: '일라이릴리', market: 'US', changePct: 1.3, flow: null },
       { ticker: '207940', name: '삼성바이오로직스', market: 'KR', changePct: 0.7, flow: 70 },
@@ -174,20 +176,30 @@ function timeAgoLabel() {
   return `${diffMin}분 전 업데이트`;
 }
 
+/* 국내 상장 종목이 없는 섹터(빅테크 등)는 외국인·기관 수급 공개 데이터 자체가 없다.
+   netFlow 0을 "유출입 없음"으로 오해하지 않도록 구분한다. */
+function hasFlowData(s) {
+  return (s.stocks || []).some((st) => st.flow != null);
+}
+
+/* 자금과 뉴스 모두 "평소 대비 % 편차"라 같은 축에서 뺄 수 있다.
+   자금은 크게 움직이는데 뉴스가 아직 조용하면 divergence가 커진다. */
+const SIGNAL_THRESHOLD = 40;
+
 function computeSignals() {
   return SECTORS
-    .map((s) => {
-      const divergence = s.flowChangePct - s.newsChangePct / 10;
-      return { ...s, divergence };
-    })
-    .filter((s) => Math.abs(s.divergence) >= 1.5)
+    .filter((s) => hasFlowData(s) && s.newsBaselineReady)
+    .map((s) => ({ ...s, divergence: +(s.flowChangePct - s.newsChangePct).toFixed(1) }))
+    .filter((s) => Math.abs(s.divergence) >= SIGNAL_THRESHOLD)
     .sort((a, b) => Math.abs(b.divergence) - Math.abs(a.divergence));
 }
 
 function sortedSectors() {
   const arr = [...SECTORS];
-  if (sortMode === 'flow') arr.sort((a, b) => b.netFlow - a.netFlow);
-  else if (sortMode === 'change') arr.sort((a, b) => b.flowChangePct - a.flowChangePct);
+  // 수급 데이터가 없는 섹터는 자금 기준 정렬에서 항상 뒤로 보낸다
+  const flowRank = (s) => (hasFlowData(s) ? 0 : 1);
+  if (sortMode === 'flow') arr.sort((a, b) => flowRank(a) - flowRank(b) || b.netFlow - a.netFlow);
+  else if (sortMode === 'change') arr.sort((a, b) => flowRank(a) - flowRank(b) || b.flowChangePct - a.flowChangePct);
   else if (sortMode === 'news') arr.sort((a, b) => b.newsVolume - a.newsVolume);
   return arr;
 }
@@ -253,14 +265,29 @@ function renderFlowPage(el) {
 }
 
 function sectorCardHtml(s) {
+  const flowAvailable = hasFlowData(s);
+  const newsLabel = s.newsBaselineReady
+    ? `뉴스 ${s.newsVolume}건 (평소 대비 ${fmtPct(s.newsChangePct)})`
+    : `뉴스 ${s.newsVolume}건 · 기준선 수집 중`;
+
+  const headPill = flowAvailable
+    ? `<span class="pill ${pillClass(s.flowChangePct)}">${arrow(s.flowChangePct)} ${fmtPct(s.flowChangePct)}</span>`
+    : `<span class="pill pill-neutral">수급 없음</span>`;
+
+  const amount = flowAvailable
+    ? `<div class="sector-flow-amt ${s.netFlow >= 0 ? 'val-up' : 'val-down'}">${fmtFlow(s.netFlow)}</div>
+       <div class="sector-flow-sub">외국인·기관 순매매${s.flowDate ? ` · ${s.flowDate} 확정` : ''}</div>`
+    : `<div class="sector-flow-amt sector-flow-na">—</div>
+       <div class="sector-flow-sub">국내 상장 종목이 없어 수급 공개 데이터가 없어요</div>`;
+
   return `
     <div class="sector-card ${flashIds.has(s.id) ? 'flash' : ''}" data-id="${s.id}">
       <div class="sector-card-head">
         <div class="sector-name"><span class="sector-icon">${s.icon}</span>${s.name}</div>
-        <span class="pill ${pillClass(s.flowChangePct)}">${arrow(s.flowChangePct)} ${fmtPct(s.flowChangePct)}</span>
+        ${headPill}
       </div>
-      <div class="sector-flow-amt ${s.netFlow >= 0 ? 'val-up' : 'val-down'}">${fmtFlow(s.netFlow)}</div>
-      <div class="sector-flow-sub">국내 상장 종목 기준 추정 · 뉴스 언급 ${s.newsVolume}건 (${fmtPct(s.newsChangePct)})</div>
+      ${amount}
+      <div class="sector-flow-sub">${newsLabel}</div>
       <div class="sector-stocks">
         ${s.stocks.slice(0, 3).map((st) => `
           <div class="mini-stock-row">
@@ -316,46 +343,53 @@ function eventCardHtml(ev) {
 
 function renderSignalPage(el) {
   const signals = computeSignals();
+  const skipped = SECTORS.filter((s) => !hasFlowData(s) || !s.newsBaselineReady);
+  const skipNote = skipped.length
+    ? `<div class="signal-note">${skipped.map((s) => s.name).join(', ')} — 수급 데이터가 없거나 뉴스 기준선이 아직 쌓이지 않아 신호 계산에서 제외했어요.</div>`
+    : '';
+
   if (signals.length === 0) {
     el.innerHTML = `
       <div class="section-title">선제 신호</div>
       <div class="empty-state">
         <div class="empty-icon">🔍</div>
-        현재 뚜렷한 선제 신호가 감지되지 않았어요.
+        평소 대비 ${SIGNAL_THRESHOLD}%p 이상 벌어진 섹터가 없어요.
       </div>
+      ${skipNote}
     `;
     return;
   }
   el.innerHTML = `
     <div class="section-title">선제 신호 — 뉴스보다 자금이 먼저 움직이는 섹터</div>
     ${signals.map(signalCardHtml).join('')}
+    ${skipNote}
   `;
 }
 
 function signalCardHtml(s) {
   const isInflow = s.flowChangePct > 0;
   const desc = isInflow
-    ? `자금은 ${fmtPct(s.flowChangePct)}로 유입 중인데 뉴스 언급 증가율은 ${fmtPct(s.newsChangePct)}로 아직 덜 알려졌어요. 뉴스가 따라붙기 전 선제 진입 후보로 볼 수 있어요.`
-    : `자금이 ${fmtPct(s.flowChangePct)}로 이탈 중인데 뉴스 언급은 ${fmtPct(s.newsChangePct)}에 그쳐요. 아직 시장이 눈치채기 전 이탈 조짐일 수 있어요.`;
-  const flowPct = Math.min(100, Math.abs(s.flowChangePct) * 10);
-  const newsPct = Math.min(100, Math.abs(s.newsChangePct) * 2);
+    ? `자금은 평소보다 ${fmtPct(s.flowChangePct)} 강하게 들어오는데 뉴스 언급은 ${fmtPct(s.newsChangePct)}에 그쳐요. 뉴스가 따라붙기 전 선제 진입 후보로 볼 수 있어요.`
+    : `자금은 평소보다 ${fmtPct(s.flowChangePct)} 빠져나가는데 뉴스 언급은 ${fmtPct(s.newsChangePct)}예요. 시장이 눈치채기 전 이탈 조짐일 수 있어요.`;
+  const barPct = (v) => Math.min(100, (Math.abs(v) / 150) * 100);
   return `
     <div class="signal-card">
       <div class="signal-top">
         <div class="signal-name"><span class="sector-icon">${s.icon}</span>${s.name}</div>
-        <span class="signal-score">divergence ${s.divergence.toFixed(1)}</span>
+        <span class="signal-score">괴리 ${s.divergence > 0 ? '+' : ''}${s.divergence}%p</span>
       </div>
       <div class="signal-desc">${desc}</div>
       <div class="signal-bars">
         <div class="signal-bar-item">
-          <div class="signal-bar-label"><span>자금 변화</span><span>${fmtPct(s.flowChangePct)}</span></div>
-          <div class="signal-bar-track"><div class="signal-bar-fill" style="width:${flowPct}%;background:${isInflow ? 'var(--up)' : 'var(--down)'}"></div></div>
+          <div class="signal-bar-label"><span>자금 (평소 대비)</span><span>${fmtPct(s.flowChangePct)}</span></div>
+          <div class="signal-bar-track"><div class="signal-bar-fill" style="width:${barPct(s.flowChangePct)}%;background:${isInflow ? 'var(--up)' : 'var(--down)'}"></div></div>
         </div>
         <div class="signal-bar-item">
-          <div class="signal-bar-label"><span>뉴스 언급 변화</span><span>${fmtPct(s.newsChangePct)}</span></div>
-          <div class="signal-bar-track"><div class="signal-bar-fill" style="width:${newsPct}%;background:var(--primary)"></div></div>
+          <div class="signal-bar-label"><span>뉴스 (평소 대비)</span><span>${fmtPct(s.newsChangePct)}</span></div>
+          <div class="signal-bar-track"><div class="signal-bar-fill" style="width:${barPct(s.newsChangePct)}%;background:var(--primary)"></div></div>
         </div>
       </div>
+      <div class="signal-foot">수급 기준일 ${s.flowDate || '—'} · 시세는 실시간, 수급은 전 거래일 확정치</div>
     </div>
   `;
 }
@@ -373,10 +407,14 @@ function openSectorDetail(id) {
       <div class="modal-title"><span class="sector-icon">${s.icon}</span>${s.name}</div>
       <button class="modal-close" id="modalCloseBtn">✕</button>
     </div>
-    <span class="pill ${pillClass(s.netFlow)}">${fmtFlow(s.netFlow)} · ${fmtPct(s.flowChangePct)}</span>
+    ${hasFlowData(s)
+      ? `<span class="pill ${pillClass(s.netFlow)}">${fmtFlow(s.netFlow)} · 평소 대비 ${fmtPct(s.flowChangePct)}</span>
+         <div class="modal-note">수급은 ${s.flowDate || '—'} 확정치예요. 등락률은 실시간이라 기준일이 다릅니다.</div>`
+      : `<span class="pill pill-neutral">수급 데이터 없음</span>
+         <div class="modal-note">국내 상장 종목이 없어 외국인·기관 순매매 공개 데이터가 없어요.</div>`}
     <table class="detail-stock-table">
       <thead>
-        <tr><th>종목</th><th>등락률</th><th>추정 수급</th></tr>
+        <tr><th>종목</th><th>등락률</th><th>순매매(억)</th></tr>
       </thead>
       <tbody>
         ${s.stocks.map((st) => `
@@ -531,13 +569,12 @@ function applyFlash() {
 
 function jitterData() {
   SECTORS = SECTORS.map((s) => {
-    const flowDelta = Math.round((Math.random() - 0.5) * 80);
-    const pctDelta = (Math.random() - 0.5) * 0.6;
+    const flowAvailable = hasFlowData(s);
     return {
       ...s,
-      netFlow: s.netFlow + flowDelta,
-      flowChangePct: +(s.flowChangePct + pctDelta).toFixed(1),
-      newsChangePct: +(s.newsChangePct + (Math.random() - 0.5) * 4).toFixed(1),
+      netFlow: flowAvailable ? s.netFlow + Math.round((Math.random() - 0.5) * 80) : 0,
+      flowChangePct: flowAvailable ? +(s.flowChangePct + (Math.random() - 0.5) * 12).toFixed(1) : 0,
+      newsChangePct: +(s.newsChangePct + (Math.random() - 0.5) * 8).toFixed(1),
       stocks: s.stocks.map((st) => ({
         ...st,
         changePct: +(st.changePct + (Math.random() - 0.5) * 0.4).toFixed(1),

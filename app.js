@@ -1,22 +1,42 @@
 /* ============================================================
-   데이터 레이어
-   지금은 전부 샘플(mock) 데이터. 실제 연동 시 아래 SECTORS / EVENTS를
-   fetchSectorData() / fetchDropEvents() 같은 async 함수로 바꿔서
-   네이버금융 크롤링 결과(GAS 백엔드가 캐싱해둔 값)를 채우면 된다.
-   구조(필드명)는 그대로 유지하는 걸 추천.
+   설정 (GAS 연동)
    ============================================================ */
 
-const SECTORS = [
+const CFG_URL_KEY = 'stock_gas_url';
+const CFG_SECRET_KEY = 'stock_gas_secret';
+const CACHE_KEY = 'stock_dashboard_cache';
+const AUTO_REFRESH_MS = 8 * 60 * 1000;
+
+function loadConfig() {
+  return {
+    url: localStorage.getItem(CFG_URL_KEY) || '',
+    key: localStorage.getItem(CFG_SECRET_KEY) || '',
+  };
+}
+function saveConfig(url, key) {
+  localStorage.setItem(CFG_URL_KEY, url.trim());
+  localStorage.setItem(CFG_SECRET_KEY, key.trim());
+}
+function isConfigured() {
+  const c = loadConfig();
+  return !!(c.url && c.key);
+}
+
+/* ============================================================
+   샘플(mock) 데이터 — 연결 전/실패 시 폴백으로 사용
+   ============================================================ */
+
+const MOCK_SECTORS = [
   {
     id: 'bigtech', name: '빅테크', icon: '💻',
     netFlow: 1240, flowChangePct: 3.2,
     newsVolume: 128, newsChangePct: 14,
     stocks: [
-      { ticker: 'AAPL', name: '애플', market: 'US', changePct: 1.2, flow: 320 },
-      { ticker: 'MSFT', name: '마이크로소프트', market: 'US', changePct: 0.8, flow: 410 },
-      { ticker: 'GOOGL', name: '알파벳', market: 'US', changePct: -0.4, flow: -60 },
-      { ticker: 'AMZN', name: '아마존', market: 'US', changePct: 2.1, flow: 380 },
-      { ticker: 'META', name: '메타', market: 'US', changePct: 1.6, flow: 190 },
+      { ticker: 'AAPL', name: '애플', market: 'US', changePct: 1.2, flow: null },
+      { ticker: 'MSFT', name: '마이크로소프트', market: 'US', changePct: 0.8, flow: null },
+      { ticker: 'GOOGL', name: '알파벳', market: 'US', changePct: -0.4, flow: null },
+      { ticker: 'AMZN', name: '아마존', market: 'US', changePct: 2.1, flow: null },
+      { ticker: 'META', name: '메타', market: 'US', changePct: 1.6, flow: null },
     ],
   },
   {
@@ -24,11 +44,11 @@ const SECTORS = [
     netFlow: -860, flowChangePct: -5.4,
     newsVolume: 96, newsChangePct: 41,
     stocks: [
-      { ticker: 'NVDA', name: '엔비디아', market: 'US', changePct: -2.8, flow: -420 },
+      { ticker: 'NVDA', name: '엔비디아', market: 'US', changePct: -2.8, flow: null },
       { ticker: '005930', name: '삼성전자', market: 'KR', changePct: -1.1, flow: -180 },
       { ticker: '000660', name: 'SK하이닉스', market: 'KR', changePct: -1.9, flow: -210 },
-      { ticker: 'TSM', name: 'TSMC', market: 'US', changePct: -0.6, flow: -30 },
-      { ticker: 'AMD', name: 'AMD', market: 'US', changePct: -1.3, flow: -20 },
+      { ticker: 'TSM', name: 'TSMC', market: 'US', changePct: -0.6, flow: null },
+      { ticker: 'AMD', name: 'AMD', market: 'US', changePct: -1.3, flow: null },
     ],
   },
   {
@@ -36,11 +56,11 @@ const SECTORS = [
     netFlow: 410, flowChangePct: 1.8,
     newsVolume: 54, newsChangePct: 6,
     stocks: [
-      { ticker: 'CRM', name: '세일즈포스', market: 'US', changePct: 0.9, flow: 90 },
-      { ticker: 'ORCL', name: '오라클', market: 'US', changePct: 1.1, flow: 120 },
+      { ticker: 'CRM', name: '세일즈포스', market: 'US', changePct: 0.9, flow: null },
+      { ticker: 'ORCL', name: '오라클', market: 'US', changePct: 1.1, flow: null },
       { ticker: '035420', name: '네이버', market: 'KR', changePct: 0.5, flow: 60 },
       { ticker: '035720', name: '카카오', market: 'KR', changePct: -0.8, flow: -40 },
-      { ticker: 'ADBE', name: '어도비', market: 'US', changePct: 1.4, flow: 180 },
+      { ticker: 'ADBE', name: '어도비', market: 'US', changePct: 1.4, flow: null },
     ],
   },
   {
@@ -48,11 +68,11 @@ const SECTORS = [
     netFlow: 300, flowChangePct: 0.9,
     newsVolume: 38, newsChangePct: -12,
     stocks: [
-      { ticker: 'JPM', name: 'JP모건', market: 'US', changePct: 0.4, flow: 70 },
+      { ticker: 'JPM', name: 'JP모건', market: 'US', changePct: 0.4, flow: null },
       { ticker: '105560', name: 'KB금융', market: 'KR', changePct: 0.6, flow: 80 },
       { ticker: '055550', name: '신한지주', market: 'KR', changePct: 0.3, flow: 40 },
       { ticker: '086790', name: '하나금융지주', market: 'KR', changePct: 0.2, flow: 30 },
-      { ticker: 'BAC', name: '뱅크오브아메리카', market: 'US', changePct: 0.5, flow: 80 },
+      { ticker: 'BAC', name: '뱅크오브아메리카', market: 'US', changePct: 0.5, flow: null },
     ],
   },
   {
@@ -60,10 +80,10 @@ const SECTORS = [
     netFlow: -520, flowChangePct: -3.9,
     newsVolume: 71, newsChangePct: 22,
     stocks: [
-      { ticker: 'TSLA', name: '테슬라', market: 'US', changePct: -2.2, flow: -220 },
+      { ticker: 'TSLA', name: '테슬라', market: 'US', changePct: -2.2, flow: null },
       { ticker: '373220', name: 'LG에너지솔루션', market: 'KR', changePct: -1.7, flow: -160 },
       { ticker: '006400', name: '삼성SDI', market: 'KR', changePct: -1.5, flow: -90 },
-      { ticker: 'ENPH', name: '엔페이즈', market: 'US', changePct: -3.1, flow: -50 },
+      { ticker: 'ENPH', name: '엔페이즈', market: 'US', changePct: -3.1, flow: null },
     ],
   },
   {
@@ -71,15 +91,15 @@ const SECTORS = [
     netFlow: 260, flowChangePct: 2.4,
     newsVolume: 29, newsChangePct: 3,
     stocks: [
-      { ticker: 'LLY', name: '일라이릴리', market: 'US', changePct: 1.3, flow: 110 },
+      { ticker: 'LLY', name: '일라이릴리', market: 'US', changePct: 1.3, flow: null },
       { ticker: '207940', name: '삼성바이오로직스', market: 'KR', changePct: 0.7, flow: 70 },
       { ticker: '068270', name: '셀트리온', market: 'KR', changePct: -0.3, flow: -20 },
-      { ticker: 'UNH', name: '유나이티드헬스', market: 'US', changePct: 0.9, flow: 100 },
+      { ticker: 'UNH', name: '유나이티드헬스', market: 'US', changePct: 0.9, flow: null },
     ],
   },
 ];
 
-const EVENTS = [
+const MOCK_EVENTS = [
   {
     date: '2026-07-18', sector: '반도체', changePct: -4.1,
     headline: 'AI 반도체 수출규제 우려 확산, 필라델피아 반도체지수 급락',
@@ -119,15 +139,24 @@ const EVENTS = [
 ];
 
 /* ============================================================
-   상태 / 유틸
+   상태
    ============================================================ */
 
+let SECTORS = MOCK_SECTORS;
+let EVENTS = MOCK_EVENTS;
 let currentPage = 'flow';
+let sortMode = 'flow'; // flow | change | news
+let connStatus = 'demo'; // demo | live | error | loading
 let lastUpdated = new Date();
+let flashIds = new Set();
+
+/* ============================================================
+   유틸
+   ============================================================ */
 
 function fmtFlow(n) {
   const sign = n >= 0 ? '+' : '';
-  return `${sign}${n.toLocaleString('ko-KR')}억`;
+  return `${sign}${Math.round(n).toLocaleString('ko-KR')}억`;
 }
 function fmtPct(n) {
   const sign = n >= 0 ? '+' : '';
@@ -145,18 +174,22 @@ function timeAgoLabel() {
   return `${diffMin}분 전 업데이트`;
 }
 
-/* 섹터별 선제 신호 점수: 자금 유입 강도와 뉴스 언급량 증가율의 괴리를 본다.
-   자금은 이미 들어오는데 뉴스가 아직 안 떠들면(언급 증가율이 낮으면) 선제 후보. */
 function computeSignals() {
   return SECTORS
     .map((s) => {
-      const flowScore = s.flowChangePct;
-      const newsScore = s.newsChangePct;
-      const divergence = flowScore - newsScore / 10;
+      const divergence = s.flowChangePct - s.newsChangePct / 10;
       return { ...s, divergence };
     })
     .filter((s) => Math.abs(s.divergence) >= 1.5)
     .sort((a, b) => Math.abs(b.divergence) - Math.abs(a.divergence));
+}
+
+function sortedSectors() {
+  const arr = [...SECTORS];
+  if (sortMode === 'flow') arr.sort((a, b) => b.netFlow - a.netFlow);
+  else if (sortMode === 'change') arr.sort((a, b) => b.flowChangePct - a.flowChangePct);
+  else if (sortMode === 'news') arr.sort((a, b) => b.newsVolume - a.newsVolume);
+  return arr;
 }
 
 /* ============================================================
@@ -164,22 +197,56 @@ function computeSignals() {
    ============================================================ */
 
 function render() {
+  renderStatusBanner();
   const el = document.getElementById('pageContainer');
   el.innerHTML = '';
   if (currentPage === 'flow') renderFlowPage(el);
   else if (currentPage === 'history') renderHistoryPage(el);
   else if (currentPage === 'signal') renderSignalPage(el);
   document.getElementById('updateTime').textContent = timeAgoLabel();
+  applyFlash();
+}
+
+function renderStatusBanner() {
+  const el = document.getElementById('statusBanner');
+  if (connStatus === 'live') {
+    el.className = 'demo-banner status-live';
+    el.innerHTML = `<span class="demo-banner-badge badge-live">LIVE</span><span class="demo-banner-text">네이버 연동 데이터 표시 중이에요.</span>`;
+  } else if (connStatus === 'error') {
+    el.className = 'demo-banner status-error';
+    el.innerHTML = `<span class="demo-banner-badge badge-error">오류</span><span class="demo-banner-text">서버 연결에 실패해서 마지막으로 받은 데이터(또는 샘플)를 보여주고 있어요. <button class="banner-link" id="openSettingsFromBanner">설정 확인</button></span>`;
+  } else if (connStatus === 'loading') {
+    el.className = 'demo-banner status-loading';
+    el.innerHTML = `<span class="demo-banner-badge">연결중</span><span class="demo-banner-text">데이터를 불러오는 중이에요…</span>`;
+  } else {
+    el.className = 'demo-banner';
+    el.innerHTML = `<span class="demo-banner-badge">DEMO</span><span class="demo-banner-text">지금은 <b>샘플 데이터</b>예요. ⚙️ 설정에서 GAS 웹앱 URL을 연결하면 실시간 데이터로 바뀝니다.</span>`;
+  }
+  const link = document.getElementById('openSettingsFromBanner');
+  if (link) link.addEventListener('click', openSettingsModal);
 }
 
 function renderFlowPage(el) {
-  const inflow = [...SECTORS].sort((a, b) => b.netFlow - a.netFlow);
+  const list = sortedSectors();
   el.innerHTML = `
-    <div class="section-title">섹터별 자금흐름 (오늘, 샘플)</div>
+    <div class="section-title-row">
+      <div class="section-title">섹터별 자금흐름</div>
+      <div class="sort-bar">
+        <button class="sort-btn ${sortMode === 'flow' ? 'active' : ''}" data-sort="flow">자금유입순</button>
+        <button class="sort-btn ${sortMode === 'change' ? 'active' : ''}" data-sort="change">변화율순</button>
+        <button class="sort-btn ${sortMode === 'news' ? 'active' : ''}" data-sort="news">뉴스언급순</button>
+      </div>
+    </div>
     <div class="sector-grid">
-      ${inflow.map(sectorCardHtml).join('')}
+      ${list.map(sectorCardHtml).join('')}
     </div>
   `;
+  el.querySelectorAll('.sort-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      sortMode = btn.dataset.sort;
+      render();
+    });
+  });
   el.querySelectorAll('.sector-card').forEach((card) => {
     card.addEventListener('click', () => openSectorDetail(card.dataset.id));
   });
@@ -187,13 +254,13 @@ function renderFlowPage(el) {
 
 function sectorCardHtml(s) {
   return `
-    <div class="sector-card" data-id="${s.id}">
+    <div class="sector-card ${flashIds.has(s.id) ? 'flash' : ''}" data-id="${s.id}">
       <div class="sector-card-head">
         <div class="sector-name"><span class="sector-icon">${s.icon}</span>${s.name}</div>
         <span class="pill ${pillClass(s.flowChangePct)}">${arrow(s.flowChangePct)} ${fmtPct(s.flowChangePct)}</span>
       </div>
       <div class="sector-flow-amt ${s.netFlow >= 0 ? 'val-up' : 'val-down'}">${fmtFlow(s.netFlow)}</div>
-      <div class="sector-flow-sub">순매수 추정 · 뉴스 언급 ${s.newsVolume}건 (${fmtPct(s.newsChangePct)})</div>
+      <div class="sector-flow-sub">국내 상장 종목 기준 추정 · 뉴스 언급 ${s.newsVolume}건 (${fmtPct(s.newsChangePct)})</div>
       <div class="sector-stocks">
         ${s.stocks.slice(0, 3).map((st) => `
           <div class="mini-stock-row">
@@ -207,6 +274,13 @@ function sectorCardHtml(s) {
 }
 
 function renderHistoryPage(el) {
+  if (EVENTS.length === 0) {
+    el.innerHTML = `
+      <div class="section-title">과도한 하락 히스토리</div>
+      <div class="empty-state"><div class="empty-icon">🗓️</div>아직 감지된 하락 이벤트가 없어요.</div>
+    `;
+    return;
+  }
   el.innerHTML = `
     <div class="section-title">과도한 하락 히스토리 — 돌아보면 매수 관점이었을까?</div>
     <div class="timeline">
@@ -216,9 +290,15 @@ function renderHistoryPage(el) {
 }
 
 function eventCardHtml(ev) {
-  const outcomeText = ev.outcome.positive
-    ? `이후 ${ev.outcome.days}거래일간 <b>+${ev.outcome.pct.toFixed(1)}%</b> 반등 — 돌아보면 매수 기회였음`
-    : `이후 ${ev.outcome.days}거래일간 ${ev.outcome.pct.toFixed(1)}% — 추세적 하락이 이어짐`;
+  let outcomeHtml;
+  if (!ev.outcome) {
+    outcomeHtml = `<div class="event-outcome neutral">⏳ 아직 판단 기간(약 20거래일)이 지나지 않았어요. 조금 더 지켜봐야 해요.</div>`;
+  } else {
+    const outcomeText = ev.outcome.positive
+      ? `이후 ${ev.outcome.days}거래일간 <b>+${ev.outcome.pct.toFixed(1)}%</b> 반등 — 돌아보면 매수 기회였음`
+      : `이후 ${ev.outcome.days}거래일간 ${ev.outcome.pct.toFixed(1)}% — 추세적 하락이 이어짐`;
+    outcomeHtml = `<div class="event-outcome ${ev.outcome.positive ? '' : 'neutral'}">${ev.outcome.positive ? '📈' : '📉'} ${outcomeText}</div>`;
+  }
   return `
     <div class="event-card">
       <div class="event-top">
@@ -229,9 +309,7 @@ function eventCardHtml(ev) {
       <div class="event-tags">
         ${ev.tags.map((t) => `<span class="pill pill-neutral">${t}</span>`).join('')}
       </div>
-      <div class="event-outcome ${ev.outcome.positive ? '' : 'neutral'}">
-        ${ev.outcome.positive ? '📈' : '📉'} ${outcomeText}
-      </div>
+      ${outcomeHtml}
     </div>
   `;
 }
@@ -305,12 +383,12 @@ function openSectorDetail(id) {
           <tr>
             <td>${st.name} <span style="color:var(--text-faint)">${st.market}</span></td>
             <td class="${st.changePct >= 0 ? 'val-up' : 'val-down'}">${fmtPct(st.changePct)}</td>
-            <td class="${st.flow >= 0 ? 'val-up' : 'val-down'}">${fmtFlow(st.flow)}</td>
+            <td class="${st.flow == null ? '' : (st.flow >= 0 ? 'val-up' : 'val-down')}">${st.flow == null ? '—' : fmtFlow(st.flow)}</td>
           </tr>
         `).join('')}
       </tbody>
     </table>
-    <div class="section-title" style="margin-top:20px;">관련 뉴스 (샘플)</div>
+    <div class="section-title" style="margin-top:20px;">관련 뉴스${connStatus === 'live' ? '' : ' (샘플)'}</div>
     <div class="news-list">
       ${mockNewsFor(s).map((n) => `
         <div class="news-item">
@@ -337,30 +415,149 @@ function mockNewsFor(s) {
 }
 
 /* ============================================================
-   새로고침 시뮬레이션 (실제 연동 전까지는 숫자를 살짝 흔들어서
-   "자동 갱신되고 있다"는 느낌만 재현)
+   설정 모달 (GAS 연동)
+   ============================================================ */
+
+function openSettingsModal() {
+  const c = loadConfig();
+  const box = document.getElementById('modalBox');
+  box.innerHTML = `
+    <div class="modal-head">
+      <div class="modal-title">⚙️ 데이터 연동 설정</div>
+      <button class="modal-close" id="modalCloseBtn">✕</button>
+    </div>
+    <p class="settings-desc">Google Apps Script(Code.gs)를 웹앱으로 배포한 뒤, 그 URL과 SECRET_KEY를 입력하면 실시간 데이터로 전환됩니다.</p>
+    <div class="form-group">
+      <label class="form-label">웹앱 URL</label>
+      <input type="text" class="form-control" id="cfgUrl" placeholder="https://script.google.com/macros/s/.../exec" value="${c.url}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">SECRET KEY</label>
+      <input type="text" class="form-control" id="cfgKey" placeholder="Code.gs의 SECRET_KEY 값" value="${c.key}">
+    </div>
+    <div class="settings-actions">
+      <button class="btn btn-ghost" id="cfgClearBtn">연결 해제 (샘플로)</button>
+      <button class="btn btn-primary" id="cfgSaveBtn">저장하고 연결 테스트</button>
+    </div>
+    <div id="cfgTestResult" class="settings-result"></div>
+  `;
+  document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
+  document.getElementById('cfgSaveBtn').addEventListener('click', onSaveConfig);
+  document.getElementById('cfgClearBtn').addEventListener('click', () => {
+    saveConfig('', '');
+    connStatus = 'demo';
+    SECTORS = MOCK_SECTORS;
+    EVENTS = MOCK_EVENTS;
+    localStorage.removeItem(CACHE_KEY);
+    closeModal();
+    render();
+  });
+  document.getElementById('modalOverlay').classList.add('open');
+}
+
+async function onSaveConfig() {
+  const url = document.getElementById('cfgUrl').value.trim();
+  const key = document.getElementById('cfgKey').value.trim();
+  const resultEl = document.getElementById('cfgTestResult');
+  if (!url || !key) {
+    resultEl.textContent = 'URL과 키를 모두 입력해주세요.';
+    resultEl.className = 'settings-result err';
+    return;
+  }
+  saveConfig(url, key);
+  resultEl.textContent = '연결 테스트 중…';
+  resultEl.className = 'settings-result';
+  const ok = await fetchDashboard();
+  if (ok) {
+    resultEl.textContent = '✅ 연결 성공! 실시간 데이터로 전환했어요.';
+    resultEl.className = 'settings-result ok';
+    setTimeout(closeModal, 900);
+  } else {
+    resultEl.textContent = '❌ 연결에 실패했어요. URL/키를 확인해주세요. (샘플 데이터 유지)';
+    resultEl.className = 'settings-result err';
+  }
+  render();
+}
+
+/* ============================================================
+   실데이터 fetch
+   ============================================================ */
+
+async function fetchDashboard() {
+  const c = loadConfig();
+  if (!c.url || !c.key) return false;
+  connStatus = 'loading';
+  try {
+    const res = await fetch(`${c.url}?action=dashboard&key=${encodeURIComponent(c.key)}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (!data.sectors || !data.sectors.length) throw new Error('empty sectors');
+
+    flashIds = new Set(diffSectorIds(SECTORS, data.sectors));
+    SECTORS = data.sectors;
+    EVENTS = data.events || [];
+    lastUpdated = new Date();
+    connStatus = 'live';
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ sectors: SECTORS, events: EVENTS, savedAt: lastUpdated.toISOString() }));
+    return true;
+  } catch (err) {
+    connStatus = 'error';
+    const cached = localStorage.getItem(CACHE_KEY);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        SECTORS = parsed.sectors;
+        EVENTS = parsed.events;
+      } catch (e) { /* 캐시 파싱 실패 시 기존 데이터 유지 */ }
+    }
+    return false;
+  }
+}
+
+function diffSectorIds(oldList, newList) {
+  const oldMap = {};
+  oldList.forEach((s) => (oldMap[s.id] = s.netFlow));
+  return newList.filter((s) => oldMap[s.id] !== undefined && oldMap[s.id] !== s.netFlow).map((s) => s.id);
+}
+
+function applyFlash() {
+  if (flashIds.size === 0) return;
+  setTimeout(() => { flashIds = new Set(); }, 1200);
+}
+
+/* ============================================================
+   새로고침 (연결 안 됐을 때는 데모용으로 숫자만 살짝 흔듦)
    ============================================================ */
 
 function jitterData() {
-  SECTORS.forEach((s) => {
+  SECTORS = SECTORS.map((s) => {
     const flowDelta = Math.round((Math.random() - 0.5) * 80);
     const pctDelta = (Math.random() - 0.5) * 0.6;
-    s.netFlow += flowDelta;
-    s.flowChangePct = +(s.flowChangePct + pctDelta).toFixed(1);
-    s.newsChangePct = +(s.newsChangePct + (Math.random() - 0.5) * 4).toFixed(1);
-    s.stocks.forEach((st) => {
-      st.changePct = +(st.changePct + (Math.random() - 0.5) * 0.4).toFixed(1);
-      st.flow += Math.round((Math.random() - 0.5) * 20);
-    });
+    return {
+      ...s,
+      netFlow: s.netFlow + flowDelta,
+      flowChangePct: +(s.flowChangePct + pctDelta).toFixed(1),
+      newsChangePct: +(s.newsChangePct + (Math.random() - 0.5) * 4).toFixed(1),
+      stocks: s.stocks.map((st) => ({
+        ...st,
+        changePct: +(st.changePct + (Math.random() - 0.5) * 0.4).toFixed(1),
+        flow: st.flow == null ? null : st.flow + Math.round((Math.random() - 0.5) * 20),
+      })),
+    };
   });
 }
 
-function doRefresh() {
+async function doRefresh() {
   const btn = document.getElementById('refreshBtn');
   btn.classList.add('spinning');
   setTimeout(() => btn.classList.remove('spinning'), 700);
-  jitterData();
-  lastUpdated = new Date();
+
+  if (isConfigured()) {
+    await fetchDashboard();
+  } else {
+    jitterData();
+    lastUpdated = new Date();
+  }
   render();
 }
 
@@ -369,25 +566,38 @@ function doRefresh() {
    ============================================================ */
 
 function init() {
-  document.querySelectorAll('.tab-btn').forEach((btn) => {
+  document.querySelectorAll('.tab-btn, .bottom-nav-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
+      document.querySelectorAll('.tab-btn, .bottom-nav-btn').forEach((b) => b.classList.remove('active'));
+      document.querySelectorAll(`[data-page="${btn.dataset.page}"]`).forEach((b) => b.classList.add('active'));
       currentPage = btn.dataset.page;
       render();
     });
   });
 
   document.getElementById('refreshBtn').addEventListener('click', doRefresh);
+  document.getElementById('settingsBtn').addEventListener('click', openSettingsModal);
   document.getElementById('modalOverlay').addEventListener('click', (e) => {
     if (e.target.id === 'modalOverlay') closeModal();
   });
 
+  const cached = localStorage.getItem(CACHE_KEY);
+  if (cached && isConfigured()) {
+    try {
+      const parsed = JSON.parse(cached);
+      SECTORS = parsed.sectors;
+      EVENTS = parsed.events;
+      connStatus = 'live';
+    } catch (e) { /* 무시 */ }
+  }
+
   render();
 
-  // 자동 갱신 시뮬레이션 (8분 주기) — 실제 연동 시 fetch 결과로 교체
-  setInterval(doRefresh, 8 * 60 * 1000);
-  // 상단 "n분 전" 텍스트만 30초마다 갱신
+  if (isConfigured()) {
+    fetchDashboard().then(render);
+  }
+
+  setInterval(doRefresh, AUTO_REFRESH_MS);
   setInterval(() => {
     document.getElementById('updateTime').textContent = timeAgoLabel();
   }, 30 * 1000);

@@ -13,14 +13,21 @@
 - 폰트: Pretendard (CDN)
 - 세그먼트 탭, 필(pill) 배지, 바텀시트형 모달(`.modal-box`)
 
-## 데이터 상태 (중요)
-`app.js` 상단 `SECTORS` / `EVENTS`는 **전부 샘플 데이터**다. 화면에는 항상 "DEMO/샘플 데이터" 배너를 노출해야 함 — 실데이터로 착각해서 매매 판단에 쓰이는 걸 방지하기 위함이니 실 연동 후에도 데이터 출처 표시는 유지할 것.
+## 데이터 상태
+`Code.gs`(GAS 백엔드)가 네이버금융 실시간 시세 + `frgn.naver` 수급 페이지 + 네이버 뉴스 검색 API를 10분 주기로 수집해서 자체 생성 스프레드시트(`StockDashboard_DB`)에 저장한다. `app.js`는 설정(⚙️)에 저장된 GAS 웹앱 URL/SECRET_KEY로 `?action=dashboard`를 호출해서 `SECTORS`/`EVENTS`를 채운다.
+연동 안 됐거나 fetch 실패 시 `MOCK_SECTORS`/`MOCK_EVENTS`(샘플)로 폴백하고 상단 배너(`renderStatusBanner`)로 DEMO/LIVE/오류 상태를 항상 표시한다 — 실데이터로 착각해서 매매 판단에 쓰이는 걸 막기 위한 장치이니 이 배너는 절대 없애지 말 것.
 
-## 실데이터 연동 계획
-1. Google Apps Script(신규 또는 accounting-app의 `Code.gs` 패턴 재사용)가 주기적으로(5~15분) 네이버금융 시세/수급 + 네이버 뉴스 검색 API를 수집해 캐싱
-2. `app.js`에 `fetchSectorData()`/`fetchDropEvents()` async 함수 추가, GAS 웹앱 엔드포인트 호출
-3. 기존 필드명(`netFlow`, `flowChangePct`, `newsVolume`, `newsChangePct`, `changePct`, `flow`, `divergence` 등) 유지하면 렌더링 코드는 그대로 재사용 가능
-4. 외국인/연기금 수급은 무료 소스 기준 실시간이 아니라 D-1~당일 반영 수준임을 UI 문구에서 계속 명시할 것
+## 데이터 소스 세부사항
+- KR 실시간 시세: `https://polling.finance.naver.com/api/realtime/domestic/stock/{code}`
+- US 실시간 시세: `https://api.stock.naver.com/stock/{reutersCode}/basic` (reutersCode는 `https://ac.stock.naver.com/ac?q={심볼}&target=stock` 검색 결과의 `reutersCode` 필드 사용 — NASDAQ는 보통 `.O`, 일부 NYSE는 접미사 없음/`.K`, 티커마다 다르므로 새 종목 추가 시 반드시 이 검색으로 확인)
+- KR 수급(외국인/기관): `https://finance.naver.com/item/frgn.naver?code={code}` HTML 파싱 (정규식, `Code.gs`의 `fetchKrFlow_` 참고) — 미국 종목은 이런 공개 수급 데이터 자체가 없어 `flow: null`
+- 뉴스 언급량: 네이버 뉴스 검색 오픈API, 섹터별 대표 키워드로 최근 24시간 건수 집계 (Client ID/Secret 필요, 없으면 0건 처리)
+- 하락 이벤트: 섹터 평균 등락률이 `DROP_THRESHOLD_PCT`(-2.5%) 이하면 자동 로깅, outcome(반등 여부)은 28일 뒤 `backfillOutcomes`가 계산
+
+## 새 섹터/종목 추가 시
+1. `Code.gs`의 `SECTOR_CONFIG`에 kr/us 종목 추가 (US는 위 방법으로 reutersCode 먼저 확인)
+2. `app.js`의 `MOCK_SECTORS`에도 동일 구조로 추가 (연동 전 샘플 화면용)
+3. 필드명(`netFlow`, `flowChangePct`, `newsVolume`, `newsChangePct`, `changePct`, `flow`, `divergence` 등)은 프론트/백엔드 둘 다 그대로 유지
 
 ## 코딩 규칙
 - 전체 리팩토링보다 최소 변경 우선, 그러나 이 레포는 아직 초기 단계라 구조 변경에 유연함

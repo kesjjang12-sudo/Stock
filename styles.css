@@ -1,4 +1,4 @@
-:root {
+:root, :root[data-theme="light"] {
   --bg: #F2F4F6;
   --card: #FFFFFF;
   --card-alt: #F9FAFB;
@@ -11,6 +11,8 @@
   --up-tint: #FDEEEF;
   --down: #3B82F6;
   --down-tint: #EBF3FE;
+  --danger: #E5484D;
+  --danger-tint: #FCEBEC;
   --border: #E5E8EB;
   --radius-lg: 20px;
   --radius-md: 14px;
@@ -33,10 +35,32 @@
     --up-tint: #3A1E22;
     --down: #4593FC;
     --down-tint: #1B2A40;
+    --danger: #FF6369;
+    --danger-tint: #3B1D1F;
     --border: #2C2E33;
     --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.35);
     --shadow-hover: 0 10px 26px rgba(0, 0, 0, 0.45);
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #121317;
+  --card: #1C1E22;
+  --card-alt: #202226;
+  --text: #F2F4F6;
+  --text-sub: #8B95A1;
+  --text-faint: #5C6370;
+  --primary: #4593FC;
+  --primary-tint: #1B2740;
+  --up: #FF5B67;
+  --up-tint: #3A1E22;
+  --down: #4593FC;
+  --down-tint: #1B2A40;
+  --danger: #FF6369;
+  --danger-tint: #3B1D1F;
+  --border: #2C2E33;
+  --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --shadow-hover: 0 10px 26px rgba(0, 0, 0, 0.45);
 }
 
 * { box-sizing: border-box; }
@@ -50,6 +74,12 @@ body {
 }
 
 .app { max-width: 1120px; margin: 0 auto; padding: 0 20px 60px; }
+
+:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 6px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
 
 /* ---------- Topbar ---------- */
 .topbar {
@@ -242,8 +272,8 @@ body {
 /* ---------- Status banner variants ---------- */
 .status-live { background: var(--up-tint); }
 .status-live .badge-live { background: var(--up); }
-.status-error { background: #FCEBEC; }
-.status-error .badge-error { background: #E5484D; }
+.status-error { background: var(--danger-tint); }
+.status-error .badge-error { background: var(--danger); }
 .status-loading { background: var(--card-alt); color: var(--text-sub); }
 .banner-link {
   border: none; background: none; text-decoration: underline; cursor: pointer;
@@ -289,7 +319,7 @@ body {
 .btn-ghost { background: var(--card-alt); color: var(--text-sub); }
 .settings-result { margin-top: 12px; font-size: 13px; min-height: 18px; }
 .settings-result.ok { color: var(--up); font-weight: 700; }
-.settings-result.err { color: #E5484D; font-weight: 700; }
+.settings-result.err { color: var(--danger); font-weight: 700; }
 
 /* ---------- Bottom nav (mobile) ---------- */
 .bottom-nav { display: none; }

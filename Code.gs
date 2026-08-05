@@ -557,7 +557,21 @@ function getDashboard_() {
     .sort((a, b) => (a.date < b.date ? 1 : -1))
     .slice(0, 20);
 
-  return { sectors: sectors, events: events, updatedAt: new Date().toISOString() };
+  const alertSheet = getOrCreateSheet_(ss, 'AlertLog', ['date', 'sectorId', 'sectorName', 'type', 'sentAt', 'body']);
+  const alerts = alertSheet.getDataRange().getValues().slice(1)
+    .map((r) => ({
+      id: String(r[0]) + '|' + r[1] + '|' + r[3],
+      date: String(r[0]),
+      sectorId: r[1],
+      sectorName: r[2],
+      type: r[3],
+      at: r[4] ? new Date(r[4]).toISOString() : '',
+      body: String(r[5] || ''),
+    }))
+    .sort((a, b) => (a.at < b.at ? 1 : -1))
+    .slice(0, 30);
+
+  return { sectors: sectors, events: events, alerts: alerts, updatedAt: new Date().toISOString() };
 }
 
 function safeParseJson_(s, fallback) {
@@ -741,16 +755,18 @@ function kakaoDisconnect_() {
    알림 판단 — 같은 날 같은 사유로 두 번 보내지 않는다
    ============================================================ */
 
+/* 알림은 카카오 연결 여부와 무관하게 항상 시트에 기록한다.
+   웹 대시보드가 이 기록을 그대로 읽어 화면에 띄우고,
+   카카오가 연결돼 있을 때만 추가로 카톡을 보낸다. */
 function checkAlerts_(ss, sectorResults) {
   const props = PropertiesService.getScriptProperties();
-  if (props.getProperty(K_ALERTS_ON) !== 'true') return;
-  if (!props.getProperty(K_REFRESH)) return;
+  const kakaoOn = props.getProperty(K_ALERTS_ON) === 'true' && !!props.getProperty(K_REFRESH);
 
-  const sheet = getOrCreateSheet_(ss, 'AlertLog', ['date', 'sectorId', 'type', 'sentAt', 'body']);
+  const sheet = getOrCreateSheet_(ss, 'AlertLog', ['date', 'sectorId', 'sectorName', 'type', 'sentAt', 'body']);
   const today = todayStr_();
   const sent = {};
   sheet.getDataRange().getValues().slice(1).forEach((r) => {
-    if (r[0] === today) sent[r[1] + '|' + r[2]] = true;
+    if (r[0] === today) sent[r[1] + '|' + r[3]] = true;
   });
 
   const queue = [];
@@ -761,13 +777,13 @@ function checkAlerts_(ss, sectorResults) {
       if (hasFlow_(r)) lines.push('자금 평소 대비 ' + fmtSigned_(r.flowChangePct) + '%');
       const headline = latestHeadline_(ss, today, r.id);
       if (headline) lines.push(headline);
-      queue.push({ sectorId: r.id, type: 'drop', body: lines.join('\n') });
+      queue.push({ sectorId: r.id, sectorName: r.name, type: 'drop', body: lines.join('\n') });
     }
 
     const divergence = +(r.flowChangePct - r.newsChangePct).toFixed(1);
     if (hasFlow_(r) && r.newsBaselineReady && Math.abs(divergence) >= SIGNAL_THRESHOLD && !sent[r.id + '|signal']) {
       queue.push({
-        sectorId: r.id, type: 'signal',
+        sectorId: r.id, sectorName: r.name, type: 'signal',
         body: (divergence > 0 ? '📈' : '⚠️') + ' [' + r.name + '] 선제 신호 ' + (divergence > 0 ? '+' : '') + divergence + '%p\n'
             + '자금 ' + fmtSigned_(r.flowChangePct) + '% / 뉴스 ' + fmtSigned_(r.newsChangePct) + '% (평소 대비)\n'
             + '수급 기준일 ' + (r.flowDate || '-'),
@@ -776,8 +792,8 @@ function checkAlerts_(ss, sectorResults) {
   });
 
   queue.slice(0, MAX_ALERTS_PER_RUN).forEach((q) => {
-    const result = sendKakao_(q.body);
-    if (result.ok) sheet.appendRow([today, q.sectorId, q.type, new Date().toISOString(), q.body]);
+    sheet.appendRow([today, q.sectorId, q.sectorName, q.type, new Date().toISOString(), q.body]);
+    if (kakaoOn) sendKakao_(q.body);
   });
 }
 

@@ -237,6 +237,32 @@ body {
 .signal-bar-track { height: 6px; border-radius: 4px; background: var(--card-alt); overflow: hidden; }
 .signal-bar-fill { height: 100%; border-radius: 4px; }
 
+/* ---------- 알림 피드 ---------- */
+.tab-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 17px; height: 17px; padding: 0 5px; margin-left: 6px;
+  border-radius: 999px; background: var(--danger); color: #fff;
+  font-size: 10.5px; font-weight: 800; line-height: 1;
+}
+/* display를 지정하면 hidden 속성(UA의 display:none)이 무력화되므로 명시적으로 되살린다 */
+.tab-badge[hidden] { display: none; }
+.bottom-nav-btn .tab-badge { position: absolute; transform: translate(14px, -14px); margin: 0; }
+.bottom-nav-btn { position: relative; }
+
+.alert-card {
+  background: var(--card); border-radius: var(--radius-md);
+  padding: 14px 16px; margin-bottom: 10px;
+  box-shadow: var(--shadow-card); border-left: 3px solid var(--border);
+}
+.alert-card.alert-drop { border-left-color: var(--down); }
+.alert-card.alert-signal { border-left-color: var(--primary); }
+.alert-card.alert-new { background: var(--primary-tint); }
+.alert-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.alert-head { font-size: 14px; font-weight: 700; line-height: 1.4; }
+.alert-time { flex-shrink: 0; font-size: 11.5px; color: var(--text-sub); display: flex; align-items: center; gap: 5px; }
+.alert-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--danger); display: inline-block; }
+.alert-line { margin-top: 5px; font-size: 12.5px; color: var(--text-sub); line-height: 1.5; }
+
 .signal-foot { margin-top: 12px; font-size: 11.5px; color: var(--text-faint); }
 .signal-note {
   margin-top: 14px; padding: 12px 14px; border-radius: var(--radius-sm);

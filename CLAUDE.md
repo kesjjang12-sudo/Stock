@@ -24,7 +24,17 @@
 - 뉴스 언급량: 네이버 뉴스 검색 오픈API, 섹터별 대표 키워드로 최근 24시간 건수 집계 (Client ID/Secret 필요, 없으면 0건 처리)
 - 하락 이벤트: 섹터 평균 등락률이 `DROP_THRESHOLD_PCT`(-2.5%) 이하면 자동 로깅, outcome(반등 여부)은 28일 뒤 `backfillOutcomes`가 계산
 
-## 카카오톡 알림 (Code.gs 하단)
+## 알림 (웹 우선)
+- `checkAlerts_`는 **카카오 연동 여부와 무관하게 항상** `AlertLog` 시트에 기록한다. 카카오가 연결돼 있으면 추가로 카톡을 보낼 뿐이다 — 이 순서를 바꾸면 웹 알림 탭이 비게 되니 주의
+- `AlertLog` 스키마: `[date, sectorId, sectorName, type, sentAt, body]` (type: `drop` | `signal`)
+- `getDashboard_`가 최근 30건을 `alerts`로 내려보내고, 프론트는 `stock_seen_alerts` localStorage로 안 읽음을 관리
+- 뱃지는 `hidden` 속성으로 토글하는데, `.tab-badge`에 `display`가 지정돼 있어 `[hidden]`이 무력화된다 → `.tab-badge[hidden] { display: none; }` 규칙이 반드시 필요
+- 브라우저 알림은 `Notification` API 사용. iOS Safari는 홈 화면 추가(PWA) 상태에서만 동작
+
+## 카카오톡 알림 (선택, Code.gs 하단)
+> 카카오톡은 단톡방/오픈채팅방 봇 공식 API가 없다. "나에게 보내기"와 친구 1:1만 가능.
+> 단톡방이 필요하면 텔레그램/디스코드 그룹 봇으로 가야 한다.
+
 - 스크립트 속성: `KAKAO_REST_KEY`(사용자 입력), `KAKAO_ACCESS_TOKEN` / `KAKAO_REFRESH_TOKEN` / `KAKAO_TOKEN_EXPIRES` / `KAKAO_ALERTS_ON`(자동 관리)
 - OAuth 콜백을 GAS 웹앱 자신이 처리한다(`action=kakaoCallback`). 카카오 서버는 secret을 붙일 수 없으므로 authorize 단계에서 발급한 1회용 `state`(UUID)로 검증 — 이 경로만 `SECRET_KEY` 검사를 우회하므로 수정 시 주의
 - 액세스 토큰 6시간 만료 → `kakaoAccessToken_()`이 만료 5분 전부터 리프레시 토큰으로 자동 재발급

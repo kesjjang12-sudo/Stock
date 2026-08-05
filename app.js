@@ -144,8 +144,23 @@ const MOCK_EVENTS = [
    상태
    ============================================================ */
 
+const MOCK_ALERTS = [
+  { id: 'm1', date: '2026-08-05', sectorId: 'semi', sectorName: '반도체', type: 'signal',
+    at: new Date(Date.now() - 12 * 60000).toISOString(),
+    body: '⚠️ [반도체] 선제 신호 -103.4%p\n자금 -62.4% / 뉴스 +41% (평소 대비)\n수급 기준일 2026-08-04' },
+  { id: 'm2', date: '2026-08-05', sectorId: 'finance', sectorName: '금융', type: 'signal',
+    at: new Date(Date.now() - 96 * 60000).toISOString(),
+    body: '📈 [금융] 선제 신호 +83.2%p\n자금 +71.2% / 뉴스 -12% (평소 대비)\n수급 기준일 2026-08-04' },
+  { id: 'm3', date: '2026-08-04', sectorId: 'battery', sectorName: '2차전지·에너지', type: 'drop',
+    at: new Date(Date.now() - 26 * 3600000).toISOString(),
+    body: '📉 [2차전지·에너지] -2.9% 하락\n자금 평소 대비 -45.8%\n전기차 보조금 축소 논의 재점화' },
+];
+
+const SEEN_KEY = 'stock_seen_alerts';
+
 let SECTORS = MOCK_SECTORS;
 let EVENTS = MOCK_EVENTS;
+let ALERTS = MOCK_ALERTS;
 let currentPage = 'flow';
 let sortMode = 'flow'; // flow | change | news
 let connStatus = 'demo'; // demo | live | error | loading
@@ -213,10 +228,91 @@ function render() {
   const el = document.getElementById('pageContainer');
   el.innerHTML = '';
   if (currentPage === 'flow') renderFlowPage(el);
+  else if (currentPage === 'alerts') renderAlertsPage(el);
   else if (currentPage === 'history') renderHistoryPage(el);
   else if (currentPage === 'signal') renderSignalPage(el);
   document.getElementById('updateTime').textContent = timeAgoLabel();
+  renderUnseenBadge();
   applyFlash();
+}
+
+/* ============================================================
+   알림 피드
+   ============================================================ */
+
+function loadSeen() {
+  try { return new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || '[]')); }
+  catch (e) { return new Set(); }
+}
+function markAllSeen() {
+  localStorage.setItem(SEEN_KEY, JSON.stringify(ALERTS.map((a) => a.id)));
+}
+function unseenAlerts() {
+  const seen = loadSeen();
+  return ALERTS.filter((a) => !seen.has(a.id));
+}
+
+function renderUnseenBadge() {
+  const n = unseenAlerts().length;
+  ['badge-tab-alerts', 'badge-nav-alerts'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = n > 9 ? '9+' : String(n);
+    el.hidden = n === 0;
+  });
+}
+
+function alertTimeLabel(iso) {
+  if (!iso) return '';
+  const diffMin = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (diffMin < 1) return '방금';
+  if (diffMin < 60) return `${diffMin}분 전`;
+  if (diffMin < 60 * 24) return `${Math.floor(diffMin / 60)}시간 전`;
+  return `${Math.floor(diffMin / 1440)}일 전`;
+}
+
+function renderAlertsPage(el) {
+  const seen = loadSeen();
+
+  if (ALERTS.length === 0) {
+    el.innerHTML = `
+      <div class="section-title">알림</div>
+      <div class="empty-state"><div class="empty-icon">🔔</div>아직 감지된 알림이 없어요.</div>
+    `;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="section-title-row">
+      <div class="section-title">알림 — 하락·선제 신호가 감지되면 여기 쌓여요</div>
+      <button class="sort-btn" id="markSeenBtn">모두 읽음</button>
+    </div>
+    ${ALERTS.map((a) => alertCardHtml(a, !seen.has(a.id))).join('')}
+  `;
+
+  document.getElementById('markSeenBtn').addEventListener('click', () => {
+    markAllSeen();
+    render();
+  });
+
+  // 목록을 실제로 봤으므로 다음 렌더부터는 읽은 것으로 처리
+  setTimeout(() => { markAllSeen(); renderUnseenBadge(); }, 2500);
+}
+
+function alertCardHtml(a, isNew) {
+  const isDrop = a.type === 'drop';
+  const lines = String(a.body).split('\n');
+  const head = lines[0] || '';
+  const rest = lines.slice(1);
+  return `
+    <div class="alert-card ${isDrop ? 'alert-drop' : 'alert-signal'} ${isNew ? 'alert-new' : ''}">
+      <div class="alert-top">
+        <span class="alert-head">${head}</span>
+        <span class="alert-time">${isNew ? '<span class="alert-dot"></span>' : ''}${alertTimeLabel(a.at)}</span>
+      </div>
+      ${rest.map((l) => `<div class="alert-line">${l}</div>`).join('')}
+    </div>
+  `;
 }
 
 function renderStatusBanner() {
@@ -478,10 +574,44 @@ function openSettingsModal() {
       <button class="btn btn-primary" id="cfgSaveBtn">저장하고 연결 테스트</button>
     </div>
     <div id="cfgTestResult" class="settings-result"></div>
+
+    <div class="kakao-box">
+      <div class="kakao-title">🔔 브라우저 알림</div>
+      <div class="kakao-desc">이 페이지를 열어두면 새 신호가 뜰 때 브라우저 알림으로 알려드려요. 아이폰은 홈 화면에 추가한 경우에만 동작합니다.</div>
+      <div class="settings-actions">
+        <button class="btn btn-primary" id="notifyBtn">알림 허용하기</button>
+      </div>
+      <div id="notifyResult" class="settings-result"></div>
+    </div>
+
     <div id="kakaoSection"></div>
   `;
   document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
   document.getElementById('cfgSaveBtn').addEventListener('click', onSaveConfig);
+
+  const notifyBtn = document.getElementById('notifyBtn');
+  const notifyResult = document.getElementById('notifyResult');
+  const paintNotifyState = () => {
+    if (!('Notification' in window)) {
+      notifyBtn.disabled = true;
+      notifyResult.textContent = '이 브라우저는 알림을 지원하지 않아요.';
+      notifyResult.className = 'settings-result';
+    } else if (Notification.permission === 'granted') {
+      notifyBtn.disabled = true;
+      notifyBtn.textContent = '알림 허용됨';
+      notifyResult.textContent = '✅ 새 신호가 뜨면 알려드릴게요.';
+      notifyResult.className = 'settings-result ok';
+    } else if (Notification.permission === 'denied') {
+      notifyResult.textContent = '브라우저에서 차단돼 있어요. 주소창의 자물쇠 아이콘에서 알림을 허용해주세요.';
+      notifyResult.className = 'settings-result err';
+    }
+  };
+  paintNotifyState();
+  notifyBtn.addEventListener('click', async () => {
+    await requestNotifyPermission();
+    paintNotifyState();
+  });
+
   renderKakaoSection();
   document.getElementById('cfgClearBtn').addEventListener('click', () => {
     saveConfig('', '');
@@ -619,11 +749,16 @@ async function fetchDashboard() {
     if (!data.sectors || !data.sectors.length) throw new Error('empty sectors');
 
     flashIds = new Set(diffSectorIds(SECTORS, data.sectors));
+    const prevIds = new Set(ALERTS.map((a) => a.id));
     SECTORS = data.sectors;
     EVENTS = data.events || [];
+    ALERTS = data.alerts || [];
     lastUpdated = new Date();
     connStatus = 'live';
-    localStorage.setItem(CACHE_KEY, JSON.stringify({ sectors: SECTORS, events: EVENTS, savedAt: lastUpdated.toISOString() }));
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ sectors: SECTORS, events: EVENTS, alerts: ALERTS, savedAt: lastUpdated.toISOString() }));
+
+    const fresh = ALERTS.filter((a) => !prevIds.has(a.id));
+    if (fresh.length) notifyNewAlerts(fresh);
     return true;
   } catch (err) {
     connStatus = 'error';
@@ -633,10 +768,31 @@ async function fetchDashboard() {
         const parsed = JSON.parse(cached);
         SECTORS = parsed.sectors;
         EVENTS = parsed.events;
+        if (parsed.alerts) ALERTS = parsed.alerts;
       } catch (e) { /* 캐시 파싱 실패 시 기존 데이터 유지 */ }
     }
     return false;
   }
+}
+
+/* 브라우저 알림 — 페이지를 열어두면 탭이 뒤에 있어도 새 신호를 알려준다.
+   (iOS Safari는 홈 화면에 추가한 경우에만 동작) */
+function notifyNewAlerts(fresh) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (document.visibilityState === 'visible' && currentPage === 'alerts') return;
+  fresh.slice(0, 3).forEach((a) => {
+    const lines = String(a.body).split('\n');
+    try {
+      new Notification(lines[0] || '새 신호', { body: lines.slice(1).join(' · '), tag: a.id });
+    } catch (e) { /* 일부 브라우저는 SW 없이 Notification 생성 불가 */ }
+  });
+}
+
+async function requestNotifyPermission() {
+  if (!('Notification' in window)) return 'unsupported';
+  if (Notification.permission === 'granted') return 'granted';
+  try { return await Notification.requestPermission(); }
+  catch (e) { return 'denied'; }
 }
 
 function diffSectorIds(oldList, newList) {

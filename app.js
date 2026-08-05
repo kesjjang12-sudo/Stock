@@ -4,18 +4,32 @@
 
 const CFG_URL_KEY = 'stock_gas_url';
 const CFG_SECRET_KEY = 'stock_gas_secret';
+const CFG_OFF_KEY = 'stock_gas_off';
 const CACHE_KEY = 'stock_dashboard_cache';
 const AUTO_REFRESH_MS = 8 * 60 * 1000;
 
+/* 기기마다 설정을 다시 입력하지 않도록 기본 연결값을 앱에 넣어둔다.
+   (저장소가 공개라 이 키는 공개값이다 — 소유자가 감수하기로 한 트레이드오프.
+   키를 바꾸려면 Code.gs의 SECRET_KEY와 여기를 함께 고쳐야 한다) */
+const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbyHgBuQl15qxuy3YXSy73uVIBN8TLvH_G_L9lqnZ5s2futWEwjfC5TEXAr67CFprYFFgg/exec';
+const DEFAULT_GAS_KEY = 'stockflow-2026!';
+
 function loadConfig() {
-  return {
-    url: localStorage.getItem(CFG_URL_KEY) || '',
-    key: localStorage.getItem(CFG_SECRET_KEY) || '',
-  };
+  const url = localStorage.getItem(CFG_URL_KEY);
+  const key = localStorage.getItem(CFG_SECRET_KEY);
+  // 사용자가 직접 "연결 해제"를 누른 경우에만 기본값 폴백을 끈다
+  if (localStorage.getItem(CFG_OFF_KEY) === '1') return { url: url || '', key: key || '' };
+  return { url: url || DEFAULT_GAS_URL, key: key || DEFAULT_GAS_KEY };
 }
 function saveConfig(url, key) {
   localStorage.setItem(CFG_URL_KEY, url.trim());
   localStorage.setItem(CFG_SECRET_KEY, key.trim());
+  localStorage.removeItem(CFG_OFF_KEY);
+}
+function clearConfig() {
+  localStorage.removeItem(CFG_URL_KEY);
+  localStorage.removeItem(CFG_SECRET_KEY);
+  localStorage.setItem(CFG_OFF_KEY, '1');
 }
 function isConfigured() {
   const c = loadConfig();
@@ -647,7 +661,7 @@ function openSettingsModal() {
       <div class="modal-title">⚙️ 데이터 연동 설정</div>
       <button class="modal-close" id="modalCloseBtn">✕</button>
     </div>
-    <p class="settings-desc">Google Apps Script(Code.gs)를 웹앱으로 배포한 뒤, 그 URL과 SECRET_KEY를 입력하면 실시간 데이터로 전환됩니다.</p>
+    <p class="settings-desc">기본 연결값이 이미 들어 있어서 어느 기기에서든 주소만 열면 바로 실시간 데이터가 뜹니다. 아래 값은 GAS를 새로 배포했을 때만 바꾸면 돼요.</p>
     <div class="form-group">
       <label class="form-label">웹앱 URL</label>
       <input type="text" class="form-control" id="cfgUrl" placeholder="https://script.google.com/macros/s/.../exec" value="${c.url}">
@@ -701,7 +715,7 @@ function openSettingsModal() {
 
   renderKakaoSection();
   document.getElementById('cfgClearBtn').addEventListener('click', () => {
-    saveConfig('', '');
+    clearConfig();
     connStatus = 'demo';
     SECTORS = MOCK_SECTORS;
     EVENTS = MOCK_EVENTS;

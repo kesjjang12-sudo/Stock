@@ -44,6 +44,11 @@
 - 카카오 텍스트 메시지 본문은 200자 제한 → `sendKakao_`가 195자로 자름
 - 수급 데이터 없는 섹터(빅테크)와 뉴스 기준선 미완 섹터는 signal 알림에서 제외, drop 알림은 발송
 
+## 연동 설정 (기본값 내장)
+기기마다 URL/키를 다시 입력하는 걸 없애려고 `app.js`에 `DEFAULT_GAS_URL` / `DEFAULT_GAS_KEY`를 박아뒀다. 저장소가 공개라 **이 키는 공개값**이며, 소유자가 편의를 위해 감수하기로 한 트레이드오프다 (링크를 아는 사람은 dashboard/refresh 호출 가능). GAS를 새로 배포하면 `Code.gs`의 `SECRET_KEY`와 여기를 **함께** 고쳐야 한다.
+- `loadConfig()`는 localStorage 값이 없으면 기본값으로 폴백한다
+- "연결 해제"는 `clearConfig()` → `stock_gas_off='1'` 플래그를 세워야 한다. 이게 없으면 지워도 기본값이 곧바로 되살아나 해제가 먹지 않는다 (`saveConfig()`는 이 플래그를 지운다)
+
 ## 국장/미장 분리 (프론트 전용)
 백엔드는 한 섹터에 KR·US 종목을 함께 담아 내려준다. 분리는 `app.js`의 `viewSectors()`가 담당한다 — `marketFilter`(`all`|`kr`|`us`, localStorage `stock_market_filter`)에 따라 `stocks`를 시장별로 거르고 `netFlow`/`avgChangePct`/`newsVolume`을 다시 집계한 **파생 배열**을 만든다. 원본 `SECTORS`는 절대 건드리지 않는다(캐시/flash 비교가 원본 기준).
 - 렌더 함수는 `SECTORS`가 아니라 `viewSectors()`를 참조해야 한다 (`sortedSectors`, `computeSignals`, `renderSignalPage`, `openSectorDetail`)

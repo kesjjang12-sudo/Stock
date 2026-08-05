@@ -131,6 +131,9 @@ function doGet(e) {
 
   try {
     if (action === 'ping') return jsonOut_({ ok: true, time: new Date().toISOString() });
+    // 편집기에 들어가지 않고 주소창만으로 트리거를 걸 수 있게 열어둔다
+    if (action === 'setup') return htmlOut_('설정 점검 결과', setup().split('\n').join('<br>'));
+    if (action === 'status') return jsonOut_(systemStatus_());
     if (action === 'dashboard') return jsonOut_(getDashboard_());
     if (action === 'refresh') { refreshAll(); return jsonOut_(getDashboard_()); }
     if (action === 'kakaoAuth') return startKakaoAuth_();
@@ -203,7 +206,8 @@ function setup() {
   try { webAppUrl = ScriptApp.getService().getUrl(); } catch (e) { /* 미배포 상태 */ }
   if (webAppUrl && webAppUrl.indexOf('/exec') > -1) {
     out.push('✅ 웹앱 배포됨');
-    out.push('   대시보드 ⚙️ 에 넣을 주소: ' + webAppUrl);
+    out.push('   이 주소가 app.js의 DEFAULT_GAS_URL과 같아야 합니다:');
+    out.push('   ' + webAppUrl);
     out.push('   SECRET KEY: ' + SECRET_KEY);
   } else {
     out.push('⬜ 아직 웹앱으로 배포되지 않았습니다.');
@@ -214,6 +218,35 @@ function setup() {
   const msg = '\n===== 설정 점검 결과 =====\n' + out.join('\n') + '\n=========================';
   Logger.log(msg);
   return msg;
+}
+
+/* 트리거가 실제로 돌고 있는지 밖에서 확인하는 용도.
+   대시보드 응답의 updatedAt은 호출 시각이라 데이터가 언제 갱신됐는지 알 수 없다. */
+function systemStatus_() {
+  const handlers = ScriptApp.getProjectTriggers().map((t) => t.getHandlerFunction());
+
+  const ss = getDb_();
+  const sheet = getOrCreateSheet_(ss, 'SectorSnapshot', SECTOR_HEADERS);
+  const rows = sheet.getDataRange().getValues();
+  const headers = rows.shift();
+  const col = headers.indexOf('updatedAt');
+
+  let last = '';
+  rows.forEach((r) => {
+    const v = r[col] instanceof Date ? r[col].toISOString() : String(r[col] || '');
+    if (v > last) last = v;
+  });
+
+  return {
+    triggerReady: handlers.indexOf('refreshAll') > -1,
+    triggers: handlers,
+    refreshIntervalMin: REFRESH_INTERVAL_MIN,
+    sectorRows: rows.length,
+    lastSnapshotAt: last,
+    lastSnapshotAgeMin: last ? Math.round((Date.now() - new Date(last).getTime()) / 60000) : null,
+    spreadsheetUrl: ss.getUrl(),
+    now: new Date().toISOString(),
+  };
 }
 
 function setupTrigger() {

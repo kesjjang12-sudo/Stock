@@ -44,6 +44,12 @@
 - 카카오 텍스트 메시지 본문은 200자 제한 → `sendKakao_`가 195자로 자름
 - 수급 데이터 없는 섹터(빅테크)와 뉴스 기준선 미완 섹터는 signal 알림에서 제외, drop 알림은 발송
 
+## GAS 액션
+`ping` · `dashboard` · `refresh` · `setup` · `status` · `kakaoAuth` / `kakaoCallback` / `kakaoStatus` / `kakaoTest` / `kakaoOff`
+- `setup` — 편집기에 들어가지 않고 주소창만으로 트리거 등록 + 연동 점검. HTML로 결과를 뿌린다
+- `status` — `triggerReady`(refreshAll 트리거 존재 여부), `lastSnapshotAt`/`lastSnapshotAgeMin`(시트가 마지막으로 갱신된 시각) 반환. **`dashboard`의 `updatedAt`은 호출 시각이라 갱신 여부 판단에 쓸 수 없다** — 트리거가 도는지 확인하려면 반드시 `status`를 봐야 한다
+- `Code.gs`를 고친 뒤에는 **배포 관리 → 편집 → 버전 "새 버전" → 배포**로 올려야 반영된다. [새 배포]를 누르면 URL이 새로 발급돼 `app.js`의 `DEFAULT_GAS_URL`과 어긋나므로 쓰지 말 것
+
 ## 연동 설정 (기본값 내장)
 기기마다 URL/키를 다시 입력하는 걸 없애려고 `app.js`에 `DEFAULT_GAS_URL` / `DEFAULT_GAS_KEY`를 박아뒀다. 저장소가 공개라 **이 키는 공개값**이며, 소유자가 편의를 위해 감수하기로 한 트레이드오프다 (링크를 아는 사람은 dashboard/refresh 호출 가능). GAS를 새로 배포하면 `Code.gs`의 `SECRET_KEY`와 여기를 **함께** 고쳐야 한다.
 - `loadConfig()`는 localStorage 값이 없으면 기본값으로 폴백한다

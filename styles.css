@@ -340,6 +340,32 @@ body {
 }
 .sort-btn.active { background: var(--card); color: var(--text); box-shadow: var(--shadow-card); }
 
+/* ---------- Trend (일/월/연 추이) ---------- */
+.trend-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.trend-chips { margin-bottom: 14px; }
+.trend-card { padding: 18px 14px 10px; }
+.trend-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 0 4px 12px;
+}
+.trend-title { font-size: 15px; font-weight: 700; }
+.trend-summary { font-size: 13px; font-weight: 700; color: var(--text-sub); }
+/* preserveAspectRatio="none" + 고정 높이 — 막대만 가로로 늘어나고 높이는 화면과 무관하게 유지된다 */
+.trend-svg { display: block; width: 100%; height: 200px; }
+.trend-bar-up { fill: var(--up); }
+.trend-bar-down { fill: var(--down); }
+.trend-zero { stroke: var(--border); stroke-width: 1; }
+.trend-xrow { position: relative; height: 18px; margin-top: 8px; }
+.trend-xlab {
+  position: absolute; transform: translateX(-50%);
+  font-size: 11px; color: var(--text-faint); white-space: nowrap;
+}
+.table-wrap { overflow-x: auto; }
+
+@media (max-width: 640px) {
+  .trend-svg { height: 150px; }
+}
+
 /* ---------- Flash-on-update ---------- */
 @keyframes flash-pulse {
   0% { box-shadow: 0 0 0 0 rgba(49, 130, 246, 0.35); }

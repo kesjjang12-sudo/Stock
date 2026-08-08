@@ -187,6 +187,18 @@ let marketFilter = localStorage.getItem(MARKET_KEY) || 'all'; // all | kr | us
 
 const MARKET_LABEL = { all: '전체', kr: '국장', us: '미장' };
 
+const TREND_PERIOD_KEY = 'stock_trend_period';
+const TREND_METRIC_KEY = 'stock_trend_metric';
+let trendPeriod = localStorage.getItem(TREND_PERIOD_KEY) || 'month'; // day | month | year
+let trendMetric = localStorage.getItem(TREND_METRIC_KEY) || 'flow';  // flow | price | news
+let trendSector = 'all';
+let TREND = null;
+let trendState = 'idle'; // idle | loading | ready | error
+const trendCache = {};
+
+const PERIOD_LABEL = { day: '일별', month: '월별', year: '연도별' };
+const METRIC_LABEL = { flow: '수급', price: '등락률', news: '뉴스' };
+
 /* ============================================================
    유틸
    ============================================================ */
@@ -293,6 +305,7 @@ function render() {
   el.innerHTML = '';
   if (currentPage === 'flow') renderFlowPage(el);
   else if (currentPage === 'alerts') renderAlertsPage(el);
+  else if (currentPage === 'trend') renderTrendPage(el);
   else if (currentPage === 'history') renderHistoryPage(el);
   else if (currentPage === 'signal') renderSignalPage(el);
   document.getElementById('updateTime').textContent = timeAgoLabel();
@@ -480,6 +493,232 @@ function sectorCardHtml(s) {
       </div>
     </div>
   `;
+}
+
+/* ============================================================
+   추이 (일/월/연)
+   ============================================================ */
+
+async function fetchTrend() {
+  const cacheKey = `${trendPeriod}|${marketFilter}|${trendMetric}`;
+  if (trendCache[cacheKey]) {
+    TREND = trendCache[cacheKey];
+    trendState = 'ready';
+    return;
+  }
+  if (!isConfigured()) {
+    trendState = 'error';
+    return;
+  }
+  trendState = 'loading';
+  try {
+    const res = await fetch(`${gasUrl('history')}&period=${trendPeriod}&market=${marketFilter}&metric=${trendMetric}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    trendCache[cacheKey] = data;
+    TREND = data;
+    trendState = 'ready';
+  } catch (err) {
+    trendState = 'error';
+  }
+}
+
+/* '전체'는 섹터를 하나로 접어서 한 줄만 그린다 — 6개 시리즈를 겹쳐 그리면
+   막대든 선이든 읽을 수가 없다. 섹터별로 보려면 칩으로 골라 들어간다. */
+function trendPoints(sectorId) {
+  if (!TREND) return [];
+  if (sectorId !== 'all') {
+    const s = TREND.series.find((x) => x.sectorId === sectorId);
+    return s ? s.points : [];
+  }
+  return TREND.buckets.map((_, i) => {
+    const vals = TREND.series.map((s) => s.points[i]).filter((v) => v !== null && v !== undefined);
+    if (!vals.length) return null;
+    const sum = vals.reduce((a, b) => a + b, 0);
+    return TREND.metric === 'price' ? +(sum / vals.length).toFixed(2) : Math.round(sum);
+  });
+}
+
+function trendValueLabel(v) {
+  if (v === null || v === undefined) return '—';
+  if (!TREND) return String(v);
+  if (TREND.metric === 'flow') return fmtFlow(v);
+  if (TREND.metric === 'price') return fmtPct(v);
+  return `${v}건`;
+}
+
+function bucketLabel(b) {
+  if (trendPeriod === 'year') return b;
+  if (trendPeriod === 'month') {
+    const [y, m] = b.split('-');
+    return `${y.slice(2)}.${Number(m)}`;
+  }
+  const [, m, d] = b.split('-');
+  return `${Number(m)}/${Number(d)}`;
+}
+
+/* 라이브러리 없이 인라인 SVG로 그린다. 막대는 viewBox로 폭에 맞춰 늘어나지만
+   축 라벨까지 같이 축소되면 폰에서 못 읽는다 — 라벨만 HTML로 얹어 실제 px을 유지한다. */
+function trendChart(buckets, points) {
+  const W = 720;
+  const H = 200;
+  const padX = 6;
+
+  const vals = points.filter((v) => v !== null && v !== undefined);
+  if (!vals.length) return '';
+
+  const maxV = Math.max(...vals, 0);
+  const minV = Math.min(...vals, 0);
+  const span = (maxV - minV) || 1;
+  const zeroY = H * (maxV / span);
+  const n = buckets.length;
+  const slot = (W - padX * 2) / n;
+  const barW = Math.max(2, Math.min(72, slot * 0.55));
+
+  const bars = points.map((v, i) => {
+    if (v === null || v === undefined) return '';
+    const cx = padX + slot * i + slot / 2;
+    const h = Math.abs(v) / span * H;
+    const y = v >= 0 ? zeroY - h : zeroY;
+    return `<rect class="${v >= 0 ? 'trend-bar-up' : 'trend-bar-down'}" x="${(cx - barW / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(1, h).toFixed(1)}" rx="2"><title>${buckets[i]} · ${trendValueLabel(v)}</title></rect>`;
+  }).join('');
+
+  // 라벨이 겹치지 않을 만큼만 남긴다
+  const step = Math.max(1, Math.ceil(n / 8));
+  const labels = buckets.map((b, i) => {
+    if (i % step !== 0 && i !== n - 1) return '';
+    const pct = ((i + 0.5) / n) * 100;
+    return `<span class="trend-xlab" style="left:${pct.toFixed(2)}%">${bucketLabel(b)}</span>`;
+  }).join('');
+
+  return `
+    <svg class="trend-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">
+      <line class="trend-zero" x1="0" y1="${zeroY.toFixed(1)}" x2="${W}" y2="${zeroY.toFixed(1)}" />
+      ${bars}
+    </svg>
+    <div class="trend-xrow">${labels}</div>
+  `;
+}
+
+function renderTrendPage(el) {
+  const segs = `
+    <div class="trend-controls">
+      <div class="sort-bar">
+        ${['day', 'month', 'year'].map((p) => `<button class="sort-btn ${trendPeriod === p ? 'active' : ''}" data-period="${p}">${PERIOD_LABEL[p]}</button>`).join('')}
+      </div>
+      <div class="sort-bar">
+        ${['flow', 'price', 'news'].map((m) => `<button class="sort-btn ${trendMetric === m ? 'active' : ''}" data-metric="${m}">${METRIC_LABEL[m]}</button>`).join('')}
+      </div>
+    </div>
+  `;
+
+  if (trendState === 'loading' || trendState === 'idle') {
+    el.innerHTML = `<div class="section-title">추이</div>${segs}<div class="empty-state">불러오는 중이에요…</div>`;
+    bindTrendControls(el);
+    return;
+  }
+
+  if (trendState === 'error') {
+    el.innerHTML = `
+      <div class="section-title">추이</div>${segs}
+      <div class="empty-state"><div class="empty-icon">⚠️</div>추이 데이터를 불러오지 못했어요. GAS를 최신 코드로 다시 배포했는지 확인해주세요.</div>`;
+    bindTrendControls(el);
+    return;
+  }
+
+  if (trendMetric === 'flow' && marketFilter === 'us') {
+    el.innerHTML = `
+      <div class="section-title">추이</div>${segs}
+      <div class="empty-state"><div class="empty-icon">🇺🇸</div>미장은 외국인·기관 순매매 공개 데이터가 없어요.<br>등락률이나 뉴스로 보거나, 국장 탭에서 확인하세요.</div>`;
+    bindTrendControls(el);
+    return;
+  }
+
+  const buckets = (TREND && TREND.buckets) || [];
+  if (!buckets.length) {
+    const backfillLink = isConfigured()
+      ? `<div class="signal-note">아직 쌓인 기록이 없어요. <a class="banner-link" href="${gasUrl('backfill')}" target="_blank" rel="noopener">과거 데이터 채우기</a>를 열면 작년치까지 한 번에 채워집니다. (1분쯤 걸리고, 안 끝나면 새로고침해서 이어서 진행)</div>`
+      : `<div class="signal-note">GAS를 먼저 연결해주세요.</div>`;
+    el.innerHTML = `
+      <div class="section-title">추이</div>${segs}
+      <div class="empty-state"><div class="empty-icon">📈</div>${trendMetric === 'news' ? '뉴스 언급량은 오늘부터 쌓여요. 하루 이틀 뒤에 다시 보세요.' : '표시할 기록이 없어요.'}</div>
+      ${trendMetric === 'news' ? '' : backfillLink}`;
+    bindTrendControls(el);
+    return;
+  }
+
+  const points = trendPoints(trendSector);
+  const vals = points.filter((v) => v !== null && v !== undefined);
+  const total = vals.reduce((a, b) => a + b, 0);
+  const summary = TREND.metric === 'price'
+    ? `평균 ${fmtPct(vals.length ? total / vals.length : 0)}`
+    : `합계 ${trendValueLabel(TREND.metric === 'flow' ? Math.round(total) : total)}`;
+
+  const chips = [{ sectorId: 'all', name: '전체', icon: '📊' }].concat(TREND.series)
+    .map((s) => `<button class="market-btn ${trendSector === s.sectorId ? 'active' : ''}" data-sector="${s.sectorId}">${s.icon} ${s.name}</button>`)
+    .join('');
+
+  const rows = buckets.map((b, i) => ({ b, v: points[i] }))
+    .filter((r) => r.v !== null && r.v !== undefined)
+    .reverse()
+    .slice(0, 12);
+
+  el.innerHTML = `
+    <div class="section-title-row">
+      <div class="section-title">${MARKET_LABEL[marketFilter]} · ${METRIC_LABEL[trendMetric]} ${PERIOD_LABEL[trendPeriod]} 추이</div>
+    </div>
+    ${segs}
+    <div class="market-seg trend-chips">${chips}</div>
+    <div class="card trend-card">
+      <div class="trend-head">
+        <div class="trend-title">${trendSector === 'all' ? '전체 섹터' : (TREND.series.find((s) => s.sectorId === trendSector) || {}).name || ''}</div>
+        <div class="trend-summary">${summary}</div>
+      </div>
+      ${trendChart(buckets, points)}
+    </div>
+    <div class="section-title">기간별 값</div>
+    <div class="table-wrap">
+      <table class="detail-stock-table">
+        <thead><tr><th>기간</th><th>${METRIC_LABEL[trendMetric]}</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => `
+            <tr>
+              <td>${r.b}</td>
+              <td class="${r.v >= 0 ? 'val-up' : 'val-down'}">${trendValueLabel(r.v)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    ${trendMetric === 'price' ? `<div class="signal-note">월·연도 등락률은 일별 수익률을 곱해 누적한 값이에요 (단순 합계가 아닙니다).</div>` : ''}
+    ${trendMetric === 'flow' ? `<div class="signal-note">수급은 국내 상장 종목만 집계돼요. 미국 종목은 공개 데이터가 없습니다.</div>` : ''}
+  `;
+
+  bindTrendControls(el);
+  el.querySelectorAll('[data-sector]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      trendSector = btn.dataset.sector;
+      render();
+    });
+  });
+}
+
+function bindTrendControls(el) {
+  el.querySelectorAll('[data-period]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      trendPeriod = btn.dataset.period;
+      localStorage.setItem(TREND_PERIOD_KEY, trendPeriod);
+      await fetchTrend();
+      render();
+    });
+  });
+  el.querySelectorAll('[data-metric]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      trendMetric = btn.dataset.metric;
+      localStorage.setItem(TREND_METRIC_KEY, trendMetric);
+      await fetchTrend();
+      render();
+    });
+  });
 }
 
 function renderHistoryPage(el) {
@@ -949,21 +1188,29 @@ async function doRefresh() {
 
 function init() {
   document.querySelectorAll('.tab-btn, .bottom-nav-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       document.querySelectorAll('.tab-btn, .bottom-nav-btn').forEach((b) => b.classList.remove('active'));
       document.querySelectorAll(`[data-page="${btn.dataset.page}"]`).forEach((b) => b.classList.add('active'));
       currentPage = btn.dataset.page;
       render();
+      if (currentPage === 'trend' && trendState !== 'ready') {
+        await fetchTrend();
+        render();
+      }
     });
   });
 
-  document.querySelectorAll('.market-btn').forEach((btn) => {
+  document.querySelectorAll('#marketSeg .market-btn').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.market === marketFilter);
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       marketFilter = btn.dataset.market;
       localStorage.setItem(MARKET_KEY, marketFilter);
-      document.querySelectorAll('.market-btn').forEach((b) => b.classList.toggle('active', b.dataset.market === marketFilter));
+      document.querySelectorAll('#marketSeg .market-btn').forEach((b) => b.classList.toggle('active', b.dataset.market === marketFilter));
       render();
+      if (currentPage === 'trend') {
+        await fetchTrend();
+        render();
+      }
     });
   });
 

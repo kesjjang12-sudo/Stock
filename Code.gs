@@ -134,6 +134,13 @@ function doGet(e) {
     // 편집기에 들어가지 않고 주소창만으로 트리거를 걸 수 있게 열어둔다
     if (action === 'setup') return htmlOut_('설정 점검 결과', setup().split('\n').join('<br>'));
     if (action === 'status') return jsonOut_(systemStatus_());
+    if (action === 'history') return jsonOut_(getHistory_(params.period, params.market, params.metric));
+    if (action === 'backfill') {
+      const r = backfillSectorDaily_(4.5 * 60 * 1000);
+      return htmlOut_(r.finished ? '백필 완료' : '백필 진행 중',
+        r.log.join('<br>') + '<br><br>' + r.done + ' / ' + r.total + ' 섹터' +
+        (r.finished ? '<br><br>끝났습니다. 대시보드 추이 탭을 확인하세요.' : '<br><br>아직 남았습니다. 이 페이지를 <b>새로고침</b>하면 이어서 진행합니다.'));
+    }
     if (action === 'dashboard') return jsonOut_(getDashboard_());
     if (action === 'refresh') { refreshAll(); return jsonOut_(getDashboard_()); }
     if (action === 'kakaoAuth') return startKakaoAuth_();
@@ -237,10 +244,17 @@ function systemStatus_() {
     if (v > last) last = v;
   });
 
+  const daily = getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS).getDataRange().getValues();
+  const dailyDates = daily.slice(1).map((r) => asDateStr_(r[0])).filter(Boolean).sort();
+
   return {
     triggerReady: handlers.indexOf('refreshAll') > -1,
     triggers: handlers,
     refreshIntervalMin: REFRESH_INTERVAL_MIN,
+    sectorDailyRows: Math.max(0, daily.length - 1),
+    sectorDailyFrom: dailyDates[0] || '',
+    sectorDailyTo: dailyDates[dailyDates.length - 1] || '',
+    backfillCursor: PropertiesService.getScriptProperties().getProperty('BACKFILL_CURSOR') || 'none',
     sectorRows: rows.length,
     lastSnapshotAt: last,
     lastSnapshotAgeMin: last ? Math.round((Date.now() - new Date(last).getTime()) / 60000) : null,
@@ -250,12 +264,13 @@ function systemStatus_() {
 }
 
 function setupTrigger() {
+  const managed = ['refreshAll', 'backfillOutcomes', 'syncUsDaily'];
   ScriptApp.getProjectTriggers().forEach((t) => {
-    const fn = t.getHandlerFunction();
-    if (fn === 'refreshAll' || fn === 'backfillOutcomes') ScriptApp.deleteTrigger(t);
+    if (managed.indexOf(t.getHandlerFunction()) > -1) ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('refreshAll').timeBased().everyMinutes(REFRESH_INTERVAL_MIN).create();
   ScriptApp.newTrigger('backfillOutcomes').timeBased().everyDays(1).atHour(8).create();
+  ScriptApp.newTrigger('syncUsDaily').timeBased().everyDays(1).atHour(8).create();
   refreshAll();
 }
 
@@ -284,6 +299,7 @@ function refreshAll() {
   ]));
 
   logDailySectorPct_(ss, results);
+  logSectorDailyFromQuotes_(ss, quotes);
   detectDropEvents_(ss, results);
   checkAlerts_(ss, results);
 }
@@ -595,6 +611,311 @@ function deriveTags_(r) {
   if (r.usChangePct <= DROP_THRESHOLD_PCT && r.krChangePct > DROP_THRESHOLD_PCT) tags.push('미국 주도');
   if (tags.length === 0) tags.push('단기 조정');
   return tags;
+}
+
+/* ============================================================
+   섹터 일별 히스토리 (일/월/연 차트용)
+   ============================================================ */
+
+/* 시장(KR/US)을 행으로 분리해 저장한다 — 국장/미장 탭과 그대로 맞물린다.
+   수급은 국내 종목에만 존재하므로 US 행의 netFlow는 항상 0이다. */
+const SECTOR_DAILY_HEADERS = ['date', 'sectorId', 'market', 'netFlow', 'avgChangePct', 'stockCount'];
+
+const BACKFILL_KR_PAGES = 20; // frgn 페이지당 20거래일 → 약 400거래일
+const BACKFILL_US_PAGES = 7;  // pageSize 60(API 상한) → 약 420거래일
+const US_PRICE_PAGE_SIZE = 60; // 이 값을 넘기면 API가 에러 문자열을 돌려준다
+const FETCH_CHUNK = 20;       // 네이버에 한 번에 몰지 않도록 나눠 보낸다
+
+/* refreshAll이 이미 종목마다 20거래일치 수급 이력을 받아놓고 최신 하루만 쓰고 버린다.
+   그걸 그대로 저장하므로 추가 네트워크 요청이 없다. 최근 20거래일을 매번 덮어써서
+   중간에 실행이 빠진 날짜도 저절로 메워진다. */
+function logSectorDailyFromQuotes_(ss, quotes) {
+  const byKey = {};
+  SECTOR_CONFIG.forEach((sec) => {
+    sec.kr.forEach((s) => {
+      addKrDaily_(byKey, sec.id, quotes.krFlow[s.code]);
+    });
+  });
+  if (!Object.keys(byKey).length) return;
+  upsertSectorDaily_(getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS), byKey);
+}
+
+/* 등락률은 연속한 두 종가에서 직접 계산한다. 매매동향 페이지의 등락률 칸은
+   부호가 별도 스타일로만 표시돼 텍스트만으로는 방향을 알 수 없다. */
+function addKrDaily_(byKey, sectorId, hist) {
+  if (!hist || hist.length < 2) return;
+  for (let i = 0; i < hist.length - 1; i++) {
+    const cur = hist[i];
+    const prev = hist[i + 1];
+    if (!cur.date || !prev.closePrice) continue;
+    const pct = +(((cur.closePrice / prev.closePrice) - 1) * 100).toFixed(2);
+    bucketAdd_(byKey, cur.date, sectorId, 'KR', cur.flow, pct);
+  }
+}
+
+function bucketAdd_(byKey, date, sectorId, market, flow, pct) {
+  const k = date + '|' + sectorId + '|' + market;
+  if (!byKey[k]) byKey[k] = { date: date, sectorId: sectorId, market: market, flow: 0, pcts: [] };
+  byKey[k].flow += flow || 0;
+  if (isFinite(pct)) byKey[k].pcts.push(pct);
+}
+
+/* 시트에서 읽은 날짜는 Date로 역변환돼 올 수 있어 항상 문자열로 맞춘다 */
+function asDateStr_(v) {
+  if (v instanceof Date) {
+    return Utilities.formatDate(v, 'Asia/Seoul', 'yyyy-MM-dd');
+  }
+  return String(v || '').slice(0, 10);
+}
+
+function upsertSectorDaily_(sheet, byKey) {
+  const values = sheet.getDataRange().getValues();
+  values.shift();
+
+  const idx = {};
+  values.forEach((r, i) => {
+    r[0] = asDateStr_(r[0]);
+    idx[r[0] + '|' + r[1] + '|' + r[2]] = i;
+  });
+
+  const added = [];
+  Object.keys(byKey).forEach((k) => {
+    const b = byKey[k];
+    const row = [b.date, b.sectorId, b.market, Math.round(b.flow), mean_(b.pcts), b.pcts.length];
+    if (idx[k] !== undefined) values[idx[k]] = row;
+    else added.push(row);
+  });
+
+  const all = values.concat(added);
+  if (!all.length) return;
+  sheet.getRange(2, 1, all.length, SECTOR_DAILY_HEADERS.length).setValues(all);
+}
+
+/* ============================================================
+   과거 백필 (1회성, 커서로 이어달리기)
+   ============================================================ */
+
+function fetchAllChunked_(reqs) {
+  const out = [];
+  for (let i = 0; i < reqs.length; i += FETCH_CHUNK) {
+    const part = reqs.slice(i, i + FETCH_CHUNK);
+    try {
+      UrlFetchApp.fetchAll(part).forEach((r) => out.push(r));
+    } catch (e) {
+      part.forEach(() => out.push(null));
+    }
+    if (i + FETCH_CHUNK < reqs.length) Utilities.sleep(300);
+  }
+  return out;
+}
+
+/* 이 API는 파라미터가 잘못되면 JSON이 아니라 평문 에러를 돌려준다 */
+function parseUsPriceHistory_(text) {
+  let arr;
+  try { arr = JSON.parse(text); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  arr.forEach((it) => {
+    const date = String(it.localTradedAt || '').slice(0, 10);
+    if (!date) return;
+    out.push({ date: date, changePct: signedRatio_(it.fluctuationsRatio, it.compareToPreviousPrice) });
+  });
+  return out;
+}
+
+function backfillSector_(sec) {
+  const byKey = {};
+
+  sec.kr.forEach((s) => {
+    const reqs = [];
+    for (let p = 1; p <= BACKFILL_KR_PAGES; p++) {
+      reqs.push({
+        url: 'https://finance.naver.com/item/frgn.naver?code=' + s.code + '&page=' + p,
+        muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+    }
+    const seen = {};
+    const hist = [];
+    fetchAllChunked_(reqs).forEach((res) => {
+      if (!res) return;
+      try {
+        parseKrFlowHistory_(res.getContentText()).forEach((h) => {
+          if (seen[h.date]) return;
+          seen[h.date] = true;
+          hist.push(h);
+        });
+      } catch (e) { /* 페이지 하나 실패는 건너뛴다 */ }
+    });
+    hist.sort((a, b) => (a.date < b.date ? 1 : -1));
+    addKrDaily_(byKey, sec.id, hist);
+  });
+
+  sec.us.forEach((s) => {
+    const reqs = [];
+    for (let p = 1; p <= BACKFILL_US_PAGES; p++) {
+      reqs.push({
+        url: 'https://api.stock.naver.com/stock/' + s.symbol + '/price?pageSize=' + US_PRICE_PAGE_SIZE + '&page=' + p,
+        muteHttpExceptions: true,
+      });
+    }
+    const seen = {};
+    fetchAllChunked_(reqs).forEach((res) => {
+      if (!res) return;
+      try {
+        parseUsPriceHistory_(res.getContentText()).forEach((d) => {
+          if (seen[d.date]) return;
+          seen[d.date] = true;
+          bucketAdd_(byKey, d.date, sec.id, 'US', 0, d.changePct);
+        });
+      } catch (e) { /* 페이지 하나 실패는 건너뛴다 */ }
+    });
+  });
+
+  return byKey;
+}
+
+/* 섹터 단위로 끊어서 처리하고 커서를 저장한다. 한 번에 다 못 끝내면
+   같은 주소를 다시 열어 이어서 진행하면 된다. */
+function backfillSectorDaily_(maxMs) {
+  const props = PropertiesService.getScriptProperties();
+  const ss = getDb_();
+  const sheet = getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS);
+  const started = Date.now();
+  const log = [];
+
+  let cursor = parseInt(props.getProperty('BACKFILL_CURSOR') || '0', 10);
+  if (!(cursor >= 0)) cursor = 0;
+
+  while (cursor < SECTOR_CONFIG.length && Date.now() - started < maxMs) {
+    const sec = SECTOR_CONFIG[cursor];
+    const byKey = backfillSector_(sec);
+    upsertSectorDaily_(sheet, byKey);
+    log.push('✅ ' + sec.name + ' — ' + Object.keys(byKey).length + '행');
+    cursor++;
+    props.setProperty('BACKFILL_CURSOR', String(cursor));
+  }
+
+  const finished = cursor >= SECTOR_CONFIG.length;
+  if (finished) props.deleteProperty('BACKFILL_CURSOR');
+  return { finished: finished, done: cursor, total: SECTOR_CONFIG.length, log: log };
+}
+
+/* 미국 종목은 refreshAll이 현재가만 받아서 일별 이력이 쌓이지 않는다.
+   하루 한 번 최근 10거래일만 받아 메운다 (종목당 1요청). */
+function syncUsDaily() {
+  const ss = getDb_();
+  const reqs = [];
+  const meta = [];
+  SECTOR_CONFIG.forEach((sec) => {
+    sec.us.forEach((s) => {
+      reqs.push({ url: 'https://api.stock.naver.com/stock/' + s.symbol + '/price?pageSize=10&page=1', muteHttpExceptions: true });
+      meta.push(sec.id);
+    });
+  });
+
+  const byKey = {};
+  fetchAllChunked_(reqs).forEach((res, i) => {
+    if (!res) return;
+    try {
+      parseUsPriceHistory_(res.getContentText()).forEach((d) => {
+        bucketAdd_(byKey, d.date, meta[i], 'US', 0, d.changePct);
+      });
+    } catch (e) { /* 무시 */ }
+  });
+
+  if (Object.keys(byKey).length) {
+    upsertSectorDaily_(getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS), byKey);
+  }
+}
+
+/* ============================================================
+   일/월/연 집계 조회
+   ============================================================ */
+
+const HISTORY_LIMIT = { day: 120, month: 36, year: 20 };
+
+function bucketKey_(date, period) {
+  if (period === 'year') return date.slice(0, 4);
+  if (period === 'month') return date.slice(0, 7);
+  return date;
+}
+
+/* 수급은 합계, 등락률은 누적 수익률(곱), 뉴스는 합계로 접는다.
+   등락률을 평균이나 합으로 접으면 기간 수익률이 아닌 값이 나온다. */
+function getHistory_(period, market, metric) {
+  period = HISTORY_LIMIT[period] ? period : 'day';
+  market = (market === 'kr' || market === 'us') ? market : 'all';
+  metric = (metric === 'price' || metric === 'news') ? metric : 'flow';
+
+  const ss = getDb_();
+  const acc = {}; // sectorId → bucket → {flow, pctByDate:{date:{sum,n}}, news}
+  const bucketSet = {};
+
+  const touch = (sectorId, bucket) => {
+    if (!acc[sectorId]) acc[sectorId] = {};
+    if (!acc[sectorId][bucket]) acc[sectorId][bucket] = { flow: 0, pctByDate: {}, news: 0 };
+    bucketSet[bucket] = true;
+    return acc[sectorId][bucket];
+  };
+
+  if (metric === 'news') {
+    const sheet = getOrCreateSheet_(ss, 'NewsDailyLog', ['date', 'sectorId', 'count']);
+    sheet.getDataRange().getValues().slice(1).forEach((r) => {
+      const date = asDateStr_(r[0]);
+      if (!date) return;
+      touch(r[1], bucketKey_(date, period)).news += Number(r[2]) || 0;
+    });
+  } else {
+    const sheet = getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS);
+    sheet.getDataRange().getValues().slice(1).forEach((r) => {
+      const date = asDateStr_(r[0]);
+      if (!date) return;
+      const mk = String(r[2] || '');
+      if (market === 'kr' && mk !== 'KR') return;
+      if (market === 'us' && mk !== 'US') return;
+
+      const b = touch(r[1], bucketKey_(date, period));
+      b.flow += Number(r[3]) || 0;
+      // 같은 날 KR/US 두 행이 오면 종목 수로 가중해 하루치 등락률을 하나로 만든다
+      const n = Number(r[5]) || 0;
+      if (n > 0) {
+        if (!b.pctByDate[date]) b.pctByDate[date] = { sum: 0, n: 0 };
+        b.pctByDate[date].sum += (Number(r[4]) || 0) * n;
+        b.pctByDate[date].n += n;
+      }
+    });
+  }
+
+  const buckets = Object.keys(bucketSet).sort().slice(-HISTORY_LIMIT[period]);
+  const series = SECTOR_CONFIG.map((sec) => {
+    const rows = acc[sec.id] || {};
+    return {
+      sectorId: sec.id,
+      name: sec.name,
+      icon: sec.icon,
+      points: buckets.map((bk) => {
+        const b = rows[bk];
+        if (!b) return null;
+        if (metric === 'news') return b.news;
+        if (metric === 'flow') return Math.round(b.flow);
+        const dates = Object.keys(b.pctByDate);
+        if (!dates.length) return null;
+        let comp = 1;
+        dates.forEach((d) => { comp *= 1 + (b.pctByDate[d].sum / b.pctByDate[d].n) / 100; });
+        return +((comp - 1) * 100).toFixed(2);
+      }),
+    };
+  }).filter((s) => s.points.some((p) => p !== null));
+
+  return {
+    period: period,
+    market: market,
+    metric: metric,
+    unit: metric === 'flow' ? '억원' : metric === 'price' ? '%' : '건',
+    buckets: buckets,
+    series: series,
+    flowAvailable: market !== 'us',
+  };
 }
 
 /* ============================================================

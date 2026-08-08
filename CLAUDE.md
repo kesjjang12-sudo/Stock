@@ -50,6 +50,16 @@
 - `status` — `triggerReady`(refreshAll 트리거 존재 여부), `lastSnapshotAt`/`lastSnapshotAgeMin`(시트가 마지막으로 갱신된 시각) 반환. **`dashboard`의 `updatedAt`은 호출 시각이라 갱신 여부 판단에 쓸 수 없다** — 트리거가 도는지 확인하려면 반드시 `status`를 봐야 한다
 - `Code.gs`를 고친 뒤에는 **배포 관리 → 편집 → 버전 "새 버전" → 배포**로 올려야 반영된다. [새 배포]를 누르면 URL이 새로 발급돼 `app.js`의 `DEFAULT_GAS_URL`과 어긋나므로 쓰지 말 것
 
+## 일/월/연 추이 (SectorDaily)
+`SectorDaily` 시트 `[date, sectorId, market, netFlow, avgChangePct, stockCount]` — 시장을 행으로 분리해 국장/미장 세그먼트와 그대로 맞물린다.
+- **수집 비용 0**: `refreshAll`은 이미 종목마다 20거래일치 수급 이력(`quotes.krFlow`)을 받아놓고 최신 하루만 쓰고 버렸다. `logSectorDailyFromQuotes_`가 그걸 저장할 뿐이라 추가 요청이 없다. 매번 최근 20거래일을 덮어써서 실행이 빠진 날짜도 저절로 메워진다
+- **등락률은 연속한 두 종가로 계산**한다(`addKrDaily_`). 매매동향 페이지의 등락률 칸은 부호가 스타일로만 표시돼 텍스트만으로는 방향을 알 수 없다
+- **미장 일별**은 `refreshAll`이 현재가만 받아서 안 쌓인다 → `syncUsDaily` 일 1회 트리거가 종목당 1요청으로 메운다
+- **백필**: `action=backfill`이 섹터 단위로 처리하고 `BACKFILL_CURSOR`를 저장한다. 6분 제한에 걸리면 같은 주소를 다시 열어 이어서 진행. KR은 `frgn.naver` page 1~20(약 400거래일), US는 일별 시세 API page 1~7
+- **US 시세 API의 `pageSize` 상한은 60**이다. 넘기면 JSON이 아니라 평문 에러를 돌려주므로 `parseUsPriceHistory_`가 빈 배열로 처리한다
+- **집계 규칙**: 수급=합계, 뉴스=합계, **등락률=누적 수익률**(일별 수익률의 곱). 등락률을 평균이나 합으로 접으면 기간 수익률이 아닌 값이 나온다. 같은 날 KR/US 두 행이 있으면 `stockCount`로 가중해 하루치를 하나로 만든 뒤 곱한다
+- 프론트 `trendChart()`는 막대만 SVG(`preserveAspectRatio="none"` + 고정 높이)로 그리고 **축 라벨은 HTML로 얹는다** — 라벨까지 viewBox에 넣으면 폰에서 같이 축소돼 못 읽는다
+
 ## 연동 설정 (기본값 내장)
 기기마다 URL/키를 다시 입력하는 걸 없애려고 `app.js`에 `DEFAULT_GAS_URL` / `DEFAULT_GAS_KEY`를 박아뒀다. 저장소가 공개라 **이 키는 공개값**이며, 소유자가 편의를 위해 감수하기로 한 트레이드오프다 (링크를 아는 사람은 dashboard/refresh 호출 가능). GAS를 새로 배포하면 `Code.gs`의 `SECRET_KEY`와 여기를 **함께** 고쳐야 한다.
 - `loadConfig()`는 localStorage 값이 없으면 기본값으로 폴백한다

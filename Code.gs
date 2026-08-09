@@ -560,7 +560,7 @@ function stripTags_(s) {
 function computeNewsChange_(ss, sectorId, count) {
   const sheet = getOrCreateSheet_(ss, 'NewsDailyLog', ['date', 'sectorId', 'count']);
   const today = todayStr_();
-  const rows = sheet.getDataRange().getValues().slice(1);
+  const rows = normalizeDateCol_(sheet.getDataRange().getValues().slice(1), 0);
 
   upsertDailyRow_(sheet, rows, today, sectorId, 2, count);
 
@@ -579,7 +579,7 @@ function computeNewsChange_(ss, sectorId, count) {
 function detectDropEvents_(ss, sectorResults) {
   const sheet = getOrCreateSheet_(ss, 'DropEvents', ['date', 'sectorId', 'sectorName', 'changePct', 'headline', 'tags', 'loggedAt']);
   const today = todayStr_();
-  const existing = sheet.getDataRange().getValues().slice(1);
+  const existing = normalizeDateCol_(sheet.getDataRange().getValues().slice(1), 0);
   const loggedToday = {};
   existing.forEach((r, i) => { if (r[0] === today) loggedToday[r[1]] = i + 2; });
 
@@ -660,12 +660,20 @@ function bucketAdd_(byKey, date, sectorId, market, flow, pct) {
   if (isFinite(pct)) byKey[k].pcts.push(pct);
 }
 
-/* 시트에서 읽은 날짜는 Date로 역변환돼 올 수 있어 항상 문자열로 맞춘다 */
+/* 시트는 'YYYY-MM-DD' 문자열을 날짜 셀로 자동 변환해서 읽을 때 Date 객체로 돌려준다.
+   그대로 쓰면 (1) JSON에 UTC ISO로 직렬화돼 화면에 하루 전 날짜가 찍히고
+   (2) `r[0] === todayStr_()` 문자열 비교가 항상 실패해 중복 행·중복 알림이 생긴다.
+   시트에서 날짜를 읽는 모든 지점에서 이걸 통과시켜야 한다. */
 function asDateStr_(v) {
   if (v instanceof Date) {
     return Utilities.formatDate(v, 'Asia/Seoul', 'yyyy-MM-dd');
   }
   return String(v || '').slice(0, 10);
+}
+
+function normalizeDateCol_(rows, col) {
+  rows.forEach((r) => { r[col] = asDateStr_(r[col]); });
+  return rows;
 }
 
 function upsertSectorDaily_(sheet, byKey) {
@@ -927,7 +935,7 @@ function getHistory_(period, market, metric) {
 function logDailySectorPct_(ss, sectorResults) {
   const sheet = getOrCreateSheet_(ss, 'SectorDailyLog', ['date', 'sectorId', 'avgChangePct']);
   const today = todayStr_();
-  const rows = sheet.getDataRange().getValues().slice(1);
+  const rows = normalizeDateCol_(sheet.getDataRange().getValues().slice(1), 0);
   sectorResults.forEach((r) => upsertDailyRow_(sheet, rows, today, r.id, 2, r.avgChangePct));
 }
 
@@ -949,13 +957,13 @@ function backfillOutcomes() {
   const outcomeSheet = getOrCreateSheet_(ss, 'DropOutcomes', ['date', 'sectorId', 'outcomePct', 'positive', 'computedAt']);
   const logSheet = getOrCreateSheet_(ss, 'SectorDailyLog', ['date', 'sectorId', 'avgChangePct']);
 
-  const events = eventSheet.getDataRange().getValues().slice(1);
+  const events = normalizeDateCol_(eventSheet.getDataRange().getValues().slice(1), 0);
   const doneKeys = {};
-  outcomeSheet.getDataRange().getValues().slice(1).forEach((r) => { doneKeys[r[0] + '|' + r[1]] = true; });
-  const logRows = logSheet.getDataRange().getValues().slice(1);
+  normalizeDateCol_(outcomeSheet.getDataRange().getValues().slice(1), 0).forEach((r) => { doneKeys[r[0] + '|' + r[1]] = true; });
+  const logRows = normalizeDateCol_(logSheet.getDataRange().getValues().slice(1), 0);
 
   events.forEach((ev) => {
-    const date = String(ev[0]);
+    const date = ev[0];
     const sectorId = ev[1];
     if (doneKeys[date + '|' + sectorId]) return;
 
@@ -993,7 +1001,7 @@ function getDashboard_() {
       id: o.id, name: o.name, icon: o.icon,
       netFlow: Number(o.netFlow) || 0,
       flowChangePct: Number(o.flowChangePct) || 0,
-      flowDate: o.flowDate || '',
+      flowDate: asDateStr_(o.flowDate),
       avgChangePct: Number(o.avgChangePct) || 0,
       krChangePct: Number(o.krChangePct) || 0,
       usChangePct: Number(o.usChangePct) || 0,
@@ -1009,15 +1017,15 @@ function getDashboard_() {
   const eventSheet = getOrCreateSheet_(ss, 'DropEvents', ['date', 'sectorId', 'sectorName', 'changePct', 'headline', 'tags', 'loggedAt']);
   const outcomeSheet = getOrCreateSheet_(ss, 'DropOutcomes', ['date', 'sectorId', 'outcomePct', 'positive', 'computedAt']);
   const outcomeMap = {};
-  outcomeSheet.getDataRange().getValues().slice(1).forEach((r) => {
+  normalizeDateCol_(outcomeSheet.getDataRange().getValues().slice(1), 0).forEach((r) => {
     outcomeMap[r[0] + '|' + r[1]] = { pct: Number(r[2]), positive: r[3] === true || r[3] === 'TRUE' };
   });
 
-  const events = eventSheet.getDataRange().getValues().slice(1)
+  const events = normalizeDateCol_(eventSheet.getDataRange().getValues().slice(1), 0)
     .map((r) => {
       const outcome = outcomeMap[r[0] + '|' + r[1]];
       return {
-        date: String(r[0]), sector: r[2], changePct: Number(r[3]), headline: r[4],
+        date: r[0], sector: r[2], changePct: Number(r[3]), headline: r[4],
         tags: safeParseJson_(r[5], []),
         outcome: outcome ? { days: 20, pct: outcome.pct, positive: outcome.positive } : null,
       };
@@ -1026,10 +1034,10 @@ function getDashboard_() {
     .slice(0, 20);
 
   const alertSheet = getOrCreateSheet_(ss, 'AlertLog', ['date', 'sectorId', 'sectorName', 'type', 'sentAt', 'body']);
-  const alerts = alertSheet.getDataRange().getValues().slice(1)
+  const alerts = normalizeDateCol_(alertSheet.getDataRange().getValues().slice(1), 0)
     .map((r) => ({
-      id: String(r[0]) + '|' + r[1] + '|' + r[3],
-      date: String(r[0]),
+      id: r[0] + '|' + r[1] + '|' + r[3],
+      date: r[0],
       sectorId: r[1],
       sectorName: r[2],
       type: r[3],
@@ -1239,7 +1247,7 @@ function checkAlerts_(ss, sectorResults) {
   const sheet = getOrCreateSheet_(ss, 'AlertLog', ['date', 'sectorId', 'sectorName', 'type', 'sentAt', 'body']);
   const today = todayStr_();
   const sent = {};
-  sheet.getDataRange().getValues().slice(1).forEach((r) => {
+  normalizeDateCol_(sheet.getDataRange().getValues().slice(1), 0).forEach((r) => {
     if (r[0] === today) sent[r[1] + '|' + r[3]] = true;
   });
 
@@ -1281,7 +1289,7 @@ function fmtSigned_(n) {
 
 function latestHeadline_(ss, today, sectorId) {
   const sheet = getOrCreateSheet_(ss, 'DropEvents', ['date', 'sectorId', 'sectorName', 'changePct', 'headline', 'tags', 'loggedAt']);
-  const rows = sheet.getDataRange().getValues().slice(1);
+  const rows = normalizeDateCol_(sheet.getDataRange().getValues().slice(1), 0);
   for (let i = rows.length - 1; i >= 0; i--) {
     if (rows[i][0] === today && rows[i][1] === sectorId) return String(rows[i][4] || '');
   }

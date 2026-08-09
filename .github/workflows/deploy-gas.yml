@@ -1,0 +1,79 @@
+name: GAS 배포
+
+# Code.gs가 바뀌어 main에 올라가면 자동 배포된다.
+# 폰에서 수동으로 돌리려면 Actions 탭 → 이 워크플로 → "Run workflow".
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Code.gs'
+      - '.clasp.json'
+      - '.claspignore'
+      - '.github/workflows/deploy-gas.yml'
+  workflow_dispatch:
+
+# 기존 배포를 새 버전으로 갱신한다. 새 배포를 만들면 /exec 주소가 바뀌어
+# app.js의 DEFAULT_GAS_URL과 어긋나므로 이 ID를 바꾸지 말 것.
+env:
+  DEPLOYMENT_ID: AKfycbyHgBuQl15qxuy3YXSy73uVIBN8TLvH_G_L9lqnZ5s2futWEwjfC5TEXAr67CFprYFFgg
+
+concurrency:
+  group: gas-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: clasp 설치
+        run: npm i -g @google/clasp@3.3.0
+
+      - name: 인증 파일 작성
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          if [ -z "$CLASPRC_JSON" ]; then
+            echo "::error::CLASPRC_JSON 시크릿이 없습니다. Settings → Secrets and variables → Actions 에 추가하세요."
+            exit 1
+          fi
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+
+      - name: 원격 매니페스트 동기화
+        # 배포된 appsscript.json(웹앱 접근 권한)을 덮어쓰지 않으려고 먼저 받아온다.
+        # pull이 Code도 같이 내려주므로 우리 버전으로 되돌린다.
+        # pull에 -f/-d를 붙이면 "원격에 없는 로컬 파일 삭제"라 app.js까지 날아간다.
+        run: |
+          clasp pull
+          rm -f Code.js
+          git checkout -- Code.gs
+
+      - name: 업로드
+        run: clasp push -f
+
+      - name: 기존 배포를 새 버전으로 갱신
+        run: clasp deploy -i "$DEPLOYMENT_ID" -d "${GITHUB_SHA::7} $(date -u +%F)"
+
+      - name: 배포 확인
+        # SECRET_KEY는 이미 공개 저장소의 app.js에 들어 있는 공개값이다.
+        run: |
+          sleep 5
+          URL="https://script.google.com/macros/s/${DEPLOYMENT_ID}/exec?action=status&key=stockflow-2026%21"
+          echo "--- status ---"
+          curl -sSL --max-time 60 "$URL" | tee status.json
+          echo
+          node -e "
+            const s = require('./status.json');
+            console.log('트리거:', s.triggers ? s.triggers.join(', ') : '없음');
+            console.log('마지막 갱신:', s.lastSnapshotAgeMin, '분 전');
+            console.log('추이 데이터:', s.sectorDailyRows, '행', s.sectorDailyFrom, '~', s.sectorDailyTo);
+            if (!s.triggerReady) {
+              console.log('::warning::refreshAll 트리거가 없습니다. ?action=setup 을 한 번 여세요.');
+            }
+          "

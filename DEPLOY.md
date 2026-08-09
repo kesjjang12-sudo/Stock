@@ -3,7 +3,24 @@
 ## 프론트 (index.html / app.js / styles.css)
 `main`에 push하면 GitHub Pages가 자동 배포한다. 할 일 없음.
 
-## GAS (Code.gs)
+## GAS (Code.gs) — 자동 배포 (권장)
+
+`main`에 `Code.gs`가 올라가면 GitHub Actions가 알아서 배포한다. **폰에서도 할 일이 없다.**
+수동으로 돌리려면 GitHub 앱/웹 → **Actions → "GAS 배포" → Run workflow**.
+
+### 최초 1회만: 인증 시크릿 등록
+컴퓨터에서 `clasp login`을 이미 했다면 `~/.clasprc.json`(윈도우는 `C:\Users\<이름>\.clasprc.json`)이 있다.
+그 **파일 내용 전체**를 복사해서:
+
+GitHub 저장소 → **Settings → Secrets and variables → Actions → New repository secret**
+- Name: `CLASPRC_JSON`
+- Secret: 파일 내용 붙여넣기
+
+> 이 토큰은 구글 계정 권한을 담고 있다. GitHub Secrets는 암호화되어 저장되고 로그에도 마스킹되지만,
+> 저장소에 push 권한이 있는 사람은 워크플로를 고쳐 값을 빼낼 수 있다. 저장소 접근 권한을 좁게 유지할 것.
+> 유출이 의심되면 https://myaccount.google.com/permissions 에서 clasp 권한을 해제하고 다시 로그인하면 된다.
+
+## GAS (Code.gs) — 로컬에서 직접
 
 ### 최초 1회 준비
 컴퓨터에서 (폰으로는 안 된다):

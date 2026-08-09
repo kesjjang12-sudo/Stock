@@ -48,7 +48,8 @@
 `ping` · `dashboard` · `refresh` · `setup` · `status` · `kakaoAuth` / `kakaoCallback` / `kakaoStatus` / `kakaoTest` / `kakaoOff`
 - `setup` — 편집기에 들어가지 않고 주소창만으로 트리거 등록 + 연동 점검. HTML로 결과를 뿌린다
 - `status` — `triggerReady`(refreshAll 트리거 존재 여부), `lastSnapshotAt`/`lastSnapshotAgeMin`(시트가 마지막으로 갱신된 시각) 반환. **`dashboard`의 `updatedAt`은 호출 시각이라 갱신 여부 판단에 쓸 수 없다** — 트리거가 도는지 확인하려면 반드시 `status`를 봐야 한다
-- `Code.gs`를 고친 뒤에는 **배포 관리 → 편집 → 버전 "새 버전" → 배포**로 올려야 반영된다. [새 배포]를 누르면 URL이 새로 발급돼 `app.js`의 `DEFAULT_GAS_URL`과 어긋나므로 쓰지 말 것
+- `Code.gs`를 고친 뒤에는 **`bash deploy.sh`** (clasp)로 올린다. 상세는 `DEPLOY.md`. 편집기에서 수동으로 할 경우 **배포 관리 → 편집 → 버전 "새 버전" → 배포**. 어느 쪽이든 [새 배포]를 만들면 URL이 새로 발급돼 `app.js`의 `DEFAULT_GAS_URL`과 어긋나므로 절대 금지
+- `.claspignore`가 `Code.gs`만 올리도록 막고 있다 — 이게 없으면 `app.js`·`index.html`이 GAS 프로젝트로 딸려 올라간다
 
 ## 일/월/연 추이 (SectorDaily)
 `SectorDaily` 시트 `[date, sectorId, market, netFlow, avgChangePct, stockCount]` — 시장을 행으로 분리해 국장/미장 세그먼트와 그대로 맞물린다.

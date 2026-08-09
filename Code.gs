@@ -34,6 +34,9 @@ const SIGNAL_THRESHOLD = 40;
 // 한 번 실행에서 보낼 수 있는 알림 개수 상한 (연동 직후 도배 방지)
 const MAX_ALERTS_PER_RUN = 3;
 
+/* etf가 있는 섹터는 구성종목을 ETF에서 자동으로 가져온다 (syncEtfHoldings).
+   kr은 ETF 동기화 전/실패 시 쓰는 폴백이자, ETF가 없는 섹터의 확정 목록이다.
+   미국 ETF는 네이버가 구성종목·순유입을 주지 않으므로 us는 항상 수동이다. */
 const SECTOR_CONFIG = [
   {
     id: 'bigtech', name: '빅테크', icon: '💻',
@@ -50,6 +53,7 @@ const SECTOR_CONFIG = [
   {
     id: 'semi', name: '반도체', icon: '🔧',
     newsQueryKr: '반도체 업황', newsQueryUs: 'semiconductor stocks chip sector',
+    etf: { code: '396500', name: 'TIGER 반도체TOP10' },
     kr: [
       { code: '005930', name: '삼성전자' },
       { code: '000660', name: 'SK하이닉스' },
@@ -63,6 +67,7 @@ const SECTOR_CONFIG = [
   {
     id: 'software', name: '소프트웨어', icon: '🖥️',
     newsQueryKr: '소프트웨어 업종 주가', newsQueryUs: 'enterprise software stocks cloud',
+    // 국내 소프트웨어 ETF는 규모가 작고 인터넷 ETF는 통신장비가 섞여 있어 수동으로 둔다
     kr: [
       { code: '035420', name: '네이버' },
       { code: '035720', name: '카카오' },
@@ -76,6 +81,7 @@ const SECTOR_CONFIG = [
   {
     id: 'finance', name: '금융', icon: '🏦',
     newsQueryKr: '금융주 실적', newsQueryUs: 'bank stocks financial sector',
+    etf: { code: '091170', name: 'KODEX 은행' },
     kr: [
       { code: '105560', name: 'KB금융' },
       { code: '055550', name: '신한지주' },
@@ -89,6 +95,7 @@ const SECTOR_CONFIG = [
   {
     id: 'battery', name: '2차전지·에너지', icon: '🔋',
     newsQueryKr: '2차전지 업황', newsQueryUs: 'EV battery stocks clean energy',
+    etf: { code: '305720', name: 'KODEX 2차전지산업' },
     kr: [
       { code: '373220', name: 'LG에너지솔루션' },
       { code: '006400', name: '삼성SDI' },
@@ -101,6 +108,7 @@ const SECTOR_CONFIG = [
   {
     id: 'health', name: '헬스케어·바이오', icon: '🧬',
     newsQueryKr: '제약 바이오 주가', newsQueryUs: 'healthcare pharma stocks',
+    etf: { code: '364970', name: 'TIGER 바이오TOP10' },
     kr: [
       { code: '207940', name: '삼성바이오로직스' },
       { code: '068270', name: '셀트리온' },
@@ -109,6 +117,27 @@ const SECTOR_CONFIG = [
       { symbol: 'LLY', name: '일라이릴리' },
       { symbol: 'UNH', name: '유나이티드헬스' },
     ],
+  },
+  {
+    id: 'beauty', name: '뷰티', icon: '💄',
+    newsQueryKr: '화장품 수출 실적', newsQueryUs: 'K-beauty cosmetics stocks',
+    etf: { code: '228790', name: 'TIGER 화장품' },
+    kr: [
+      { code: '051900', name: 'LG생활건강' },
+      { code: '192820', name: '코스맥스' },
+    ],
+    us: [],
+  },
+  {
+    id: 'power', name: '전력', icon: '⚡',
+    newsQueryKr: '전력기기 전력설비 수주', newsQueryUs: 'power grid equipment stocks',
+    etf: { code: '0117V0', name: 'TIGER 코리아AI전력기기TOP3플러스' },
+    kr: [
+      { code: '298040', name: '효성중공업' },
+      { code: '010120', name: 'LS ELECTRIC' },
+      { code: '267260', name: 'HD현대일렉트릭' },
+    ],
+    us: [],
   },
 ];
 
@@ -134,7 +163,8 @@ function doGet(e) {
     // 편집기에 들어가지 않고 주소창만으로 트리거를 걸 수 있게 열어둔다
     if (action === 'setup') return htmlOut_('설정 점검 결과', setup().split('\n').join('<br>'));
     if (action === 'status') return jsonOut_(systemStatus_());
-    if (action === 'history') return jsonOut_(getHistory_(params.period, params.market, params.metric));
+    if (action === 'history') return jsonOut_(getHistory_(params.period, params.market, params.metric, params.investor, params.from, params.to));
+    if (action === 'syncEtf') return jsonOut_(syncEtfHoldings());
     if (action === 'backfill') {
       const r = backfillSectorDaily_(4.5 * 60 * 1000);
       return htmlOut_(r.finished ? '백필 완료' : '백필 진행 중',
@@ -264,13 +294,15 @@ function systemStatus_() {
 }
 
 function setupTrigger() {
-  const managed = ['refreshAll', 'backfillOutcomes', 'syncUsDaily'];
+  const managed = ['refreshAll', 'backfillOutcomes', 'syncUsDaily', 'syncEtfHoldings'];
   ScriptApp.getProjectTriggers().forEach((t) => {
     if (managed.indexOf(t.getHandlerFunction()) > -1) ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('refreshAll').timeBased().everyMinutes(REFRESH_INTERVAL_MIN).create();
   ScriptApp.newTrigger('backfillOutcomes').timeBased().everyDays(1).atHour(8).create();
   ScriptApp.newTrigger('syncUsDaily').timeBased().everyDays(1).atHour(8).create();
+  ScriptApp.newTrigger('syncEtfHoldings').timeBased().everyDays(1).atHour(7).create();
+  syncEtfHoldings();
   refreshAll();
 }
 
@@ -282,11 +314,14 @@ const SECTOR_HEADERS = [
   'id', 'name', 'icon', 'netFlow', 'flowChangePct', 'flowDate',
   'avgChangePct', 'krChangePct', 'usChangePct',
   'newsVolume', 'newsKr', 'newsUs', 'newsChangePct', 'newsBaselineReady', 'stocksJson', 'updatedAt',
+  'frgnFlow', 'orgFlow', 'indiFlow', 'etfName',
 ];
 
 function refreshAll() {
   const ss = getDb_();
-  const quotes = fetchAllMarketData_();
+  // 구성종목 스냅샷이 없으면 먼저 만든다 (최초 실행/신규 섹터 추가 시)
+  if (!hasEtfHoldings_(ss)) syncEtfHoldings();
+  const quotes = fetchAllMarketData_(ss);
 
   const results = SECTOR_CONFIG.map((sec) => buildSectorSnapshot_(ss, sec, quotes));
 
@@ -296,6 +331,7 @@ function refreshAll() {
     r.avgChangePct, r.krChangePct, r.usChangePct,
     r.newsVolume, r.newsKr, r.newsUs, r.newsChangePct, r.newsBaselineReady,
     JSON.stringify(r.stocks), new Date().toISOString(),
+    r.frgnFlow, r.orgFlow, r.indiFlow, r.etfName,
   ]));
 
   logDailySectorPct_(ss, results);
@@ -305,40 +341,90 @@ function refreshAll() {
 }
 
 /* 모든 종목의 시세/수급 요청을 한 번에 병렬 실행한다.
-   GAS는 실행시간 6분 제한이 있어 순차 fetch로는 종목이 늘어날수록 위험하다. */
-function fetchAllMarketData_() {
-  const reqs = [];
-  const meta = [];
+   GAS는 실행시간 6분 제한이 있어 순차 fetch로는 종목이 늘어날수록 위험하다.
+   국내 시세는 콤마로 묶어 한 번에 받으므로 종목이 70개로 늘어도 요청은 몇 건뿐이다. */
+function fetchAllMarketData_(ss) {
+  const krStocks = activeKrStocks_(ss);
 
+  // 섹터 간 중복 종목은 한 번만 받는다
+  const codes = [];
+  const seen = {};
   SECTOR_CONFIG.forEach((sec) => {
-    sec.kr.forEach((s) => {
-      reqs.push({ url: 'https://polling.finance.naver.com/api/realtime/domestic/stock/' + s.code, muteHttpExceptions: true });
-      meta.push({ kind: 'krQuote', code: s.code });
-      reqs.push({ url: 'https://finance.naver.com/item/frgn.naver?code=' + s.code + '&page=1', muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } });
-      meta.push({ kind: 'krFlow', code: s.code });
-    });
-    sec.us.forEach((s) => {
-      reqs.push({ url: 'https://api.stock.naver.com/stock/' + s.symbol + '/basic', muteHttpExceptions: true });
-      meta.push({ kind: 'usQuote', code: s.symbol });
+    (krStocks[sec.id] || []).forEach((s) => {
+      if (seen[s.code]) return;
+      seen[s.code] = true;
+      codes.push(s.code);
     });
   });
 
-  let responses;
-  try {
-    responses = UrlFetchApp.fetchAll(reqs);
-  } catch (err) {
-    responses = reqs.map(() => null);
-  }
+  const out = { krQuote: {}, krTrend: {}, usQuote: {}, market: {}, krStocks: krStocks };
 
-  const out = { krQuote: {}, krFlow: {}, usQuote: {} };
-  responses.forEach((res, i) => {
-    const m = meta[i];
+  // 1) 국내 시세 — 콤마로 묶어서 배치 요청
+  const quoteReqs = [];
+  for (let i = 0; i < codes.length; i += QUOTE_BATCH) {
+    quoteReqs.push({
+      url: 'https://polling.finance.naver.com/api/realtime/domestic/stock/' + codes.slice(i, i + QUOTE_BATCH).join(','),
+      muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' },
+    });
+  }
+  fetchAllChunked_(quoteReqs).forEach((res) => {
     if (!res) return;
     try {
-      if (m.kind === 'krQuote') out.krQuote[m.code] = parseKrQuote_(res.getContentText());
-      else if (m.kind === 'usQuote') out.usQuote[m.code] = parseUsQuote_(res.getContentText());
-      else if (m.kind === 'krFlow') out.krFlow[m.code] = parseKrFlowHistory_(res.getContentText());
-    } catch (e) { /* 개별 종목 파싱 실패는 무시하고 나머지를 살린다 */ }
+      const d = JSON.parse(res.getContentText());
+      (d.datas || []).forEach((it) => {
+        const code = String(it.itemCode || '');
+        if (!code) return;
+        out.krQuote[code] = {
+          changePct: signedRatio_(it.fluctuationsRatio, it.compareToPreviousPrice),
+          price: numOf_(it.closePrice),
+        };
+        const ex = (it.stockExchangeType && it.stockExchangeType.code) || '';
+        out.market[code] = ex === 'KQ' ? 'KOSDAQ' : 'KOSPI';
+      });
+    } catch (e) { /* 배치 하나 실패는 나머지를 살린다 */ }
+  });
+
+  // 2) 국내 수급 — 종목당 1요청 (전일 확정치라 최근 10거래일이면 충분)
+  const trendReqs = codes.map((c) => ({
+    url: trendUrl_(c, ''), muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' },
+  }));
+  fetchAllChunked_(trendReqs).forEach((res, i) => {
+    if (!res) return;
+    try { out.krTrend[codes[i]] = parseTrendHistory_(res.getContentText()); } catch (e) { /* 무시 */ }
+  });
+
+  // 3) 미국 시세 — 배치 엔드포인트가 없어 종목당 1요청
+  const usReqs = [];
+  const usMeta = [];
+  SECTOR_CONFIG.forEach((sec) => {
+    sec.us.forEach((s) => {
+      usReqs.push({ url: 'https://api.stock.naver.com/stock/' + s.symbol + '/basic', muteHttpExceptions: true });
+      usMeta.push(s.symbol);
+    });
+  });
+  fetchAllChunked_(usReqs).forEach((res, i) => {
+    if (!res) return;
+    try { out.usQuote[usMeta[i]] = parseUsQuote_(res.getContentText()); } catch (e) { /* 무시 */ }
+  });
+
+  saveMarketMap_(ss, out.market);
+  return out;
+}
+
+/* 코스피/코스닥 구분은 시세 응답에 딸려오므로 공짜다.
+   백필은 시세를 안 받으므로 시트에 저장해두고 재사용한다. */
+function saveMarketMap_(ss, map) {
+  const codes = Object.keys(map);
+  if (!codes.length) return;
+  const sheet = getOrCreateSheet_(ss, 'StockMarket', ['itemCode', 'market']);
+  writeRows_(sheet, codes.map((c) => [c, map[c]]));
+}
+
+function loadMarketMap_(ss) {
+  const sheet = getOrCreateSheet_(ss, 'StockMarket', ['itemCode', 'market']);
+  const out = {};
+  sheet.getDataRange().getValues().slice(1).forEach((r) => {
+    if (r[0]) out[String(r[0])] = String(r[1] || 'KOSPI');
   });
   return out;
 }
@@ -348,29 +434,39 @@ function buildSectorSnapshot_(ss, sec, quotes) {
   const krPcts = [];
   const usPcts = [];
 
-  let netFlow = 0;
+  let frgnFlow = 0;
+  let orgFlow = 0;
+  let indiFlow = 0;
   let priorMeanFlow = 0;
   let priorMeanAbsFlow = 0;
   let flowDate = '';
 
-  sec.kr.forEach((s) => {
+  (quotes.krStocks[sec.id] || []).forEach((s) => {
     const q = quotes.krQuote[s.code];
-    const hist = quotes.krFlow[s.code];
+    const hist = quotes.krTrend[s.code];
     const changePct = q ? q.changePct : 0;
     let flow = null;
 
     if (hist && hist.length) {
-      flow = hist[0].flow;
-      netFlow += flow;
+      const cur = hist[0];
+      flow = cur.frgnFlow + cur.orgFlow;
+      frgnFlow += cur.frgnFlow;
+      orgFlow += cur.orgFlow;
+      indiFlow += cur.indiFlow;
+
       const prior = hist.slice(1);
       if (prior.length) {
-        priorMeanFlow += prior.reduce((a, h) => a + h.flow, 0) / prior.length;
-        priorMeanAbsFlow += prior.reduce((a, h) => a + Math.abs(h.flow), 0) / prior.length;
+        const net = (h) => h.frgnFlow + h.orgFlow;
+        priorMeanFlow += prior.reduce((a, h) => a + net(h), 0) / prior.length;
+        priorMeanAbsFlow += prior.reduce((a, h) => a + Math.abs(net(h)), 0) / prior.length;
       }
-      if (!flowDate || hist[0].date > flowDate) flowDate = hist[0].date;
+      if (!flowDate || cur.date > flowDate) flowDate = cur.date;
     }
 
-    stocks.push({ ticker: s.code, name: s.name, market: 'KR', changePct, flow });
+    stocks.push({
+      ticker: s.code, name: s.name, market: quotes.market[s.code] || 'KOSPI',
+      changePct, flow,
+    });
     krPcts.push(changePct);
   });
 
@@ -380,6 +476,8 @@ function buildSectorSnapshot_(ss, sec, quotes) {
     stocks.push({ ticker: s.symbol.replace(/\.[A-Z]$/, ''), name: s.name, market: 'US', changePct, flow: null });
     usPcts.push(changePct);
   });
+
+  const netFlow = frgnFlow + orgFlow;
 
   // 평소 수급 규모로 정규화한 이례도. 평균이 0 근처여도 폭주하지 않는다.
   const flowChangePct = priorMeanAbsFlow > 0
@@ -392,7 +490,11 @@ function buildSectorSnapshot_(ss, sec, quotes) {
   const allPcts = krPcts.concat(usPcts);
   return {
     id: sec.id, name: sec.name, icon: sec.icon,
+    etfName: sec.etf ? sec.etf.name : '',
     netFlow: Math.round(netFlow),
+    frgnFlow: Math.round(frgnFlow),
+    orgFlow: Math.round(orgFlow),
+    indiFlow: Math.round(indiFlow),
     flowChangePct,
     flowDate,
     avgChangePct: mean_(allPcts),
@@ -614,50 +716,203 @@ function deriveTags_(r) {
 }
 
 /* ============================================================
+   ETF 구성종목 / 순유입
+   ============================================================ */
+
+const ETF_HOLDINGS_HEADERS = ['date', 'sectorId', 'etfCode', 'etfName', 'rank', 'itemCode', 'itemName', 'weight'];
+const ETF_FLOW_HEADERS = ['date', 'sectorId', 'etfCode', 'etfName', 'inflow1d', 'inflow1w', 'inflow1m', 'marketValue'];
+
+/* "4조 7,626억" / "-1,691억" 같은 한글 금액을 억 단위 숫자로 바꾼다 */
+function parseKoreanAmount_(s) {
+  const t = String(s == null ? '' : s).replace(/[,\s]/g, '');
+  if (!t) return 0;
+  const neg = t.indexOf('-') > -1;
+  const jo = t.match(/(\d+(?:\.\d+)?)조/);
+  const eok = t.match(/(-?\d+(?:\.\d+)?)억/);
+  let v = 0;
+  if (jo) v += parseFloat(jo[1]) * 10000;
+  if (eok) v += Math.abs(parseFloat(eok[1]));
+  if (!jo && !eok) v = Math.abs(parseFloat(t)) || 0;
+  return neg ? -v : v;
+}
+
+/* ETF 구성종목은 리밸런싱으로 바뀐다. 날짜별 스냅샷으로 남겨야
+   "그때는 무엇이 들어 있었나"를 나중에 확인할 수 있다. */
+function syncEtfHoldings() {
+  const ss = getDb_();
+  const targets = SECTOR_CONFIG.filter((s) => s.etf);
+  if (!targets.length) return { updated: 0 };
+
+  const reqs = targets.map((s) => ({
+    url: 'https://m.stock.naver.com/api/stock/' + s.etf.code + '/etfAnalysis',
+    muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' },
+  }));
+
+  const today = todayStr_();
+  const holdRows = [];
+  const flowRows = [];
+
+  fetchAllChunked_(reqs).forEach((res, i) => {
+    if (!res) return;
+    const sec = targets[i];
+    let d;
+    try { d = JSON.parse(res.getContentText()); } catch (e) { return; }
+    const top = d.etfTop10MajorConstituentAssets || [];
+    if (!top.length) return;
+
+    top.forEach((a) => {
+      holdRows.push([today, sec.id, sec.etf.code, d.itemName || sec.etf.name,
+        Number(a.seq) || 0, String(a.itemCode || ''), String(a.itemName || ''),
+        parseFloat(String(a.etfWeight || '0').replace('%', '')) || 0]);
+    });
+
+    const inf = d.cumulativeNetInflowList || {};
+    flowRows.push([today, sec.id, sec.etf.code, d.itemName || sec.etf.name,
+      parseKoreanAmount_(inf.cumulativeNetInflow1d),
+      parseKoreanAmount_(inf.cumulativeNetInflow1w),
+      parseKoreanAmount_(inf.cumulativeNetInflow1m),
+      parseKoreanAmount_(d.marketValue)]);
+  });
+
+  if (holdRows.length) replaceRowsForDate_(getOrCreateSheet_(ss, 'EtfHoldings', ETF_HOLDINGS_HEADERS), today, holdRows);
+  if (flowRows.length) replaceRowsForDate_(getOrCreateSheet_(ss, 'EtfFlow', ETF_FLOW_HEADERS), today, flowRows);
+  return { updated: flowRows.length, holdings: holdRows.length };
+}
+
+/* 같은 날짜 행을 지우고 새로 넣는다 (하루 여러 번 돌려도 중복이 안 쌓인다) */
+function replaceRowsForDate_(sheet, date, rows) {
+  const values = sheet.getDataRange().getValues();
+  const headers = values.shift();
+  const kept = values.filter((r) => asDateStr_(r[0]) !== date);
+  const all = kept.concat(rows);
+  sheet.getRange(2, 1, Math.max(all.length, values.length), headers.length)
+    .setValues(padRows_(all, Math.max(all.length, values.length), headers.length));
+}
+
+function padRows_(rows, n, cols) {
+  const out = rows.slice();
+  while (out.length < n) out.push(new Array(cols).fill(''));
+  return out;
+}
+
+/* 섹터가 실제로 집계에 쓰는 국내 종목. ETF 스냅샷이 있으면 그걸,
+   없으면 SECTOR_CONFIG의 수동 목록을 쓴다. */
+function activeKrStocks_(ss) {
+  const sheet = getOrCreateSheet_(ss, 'EtfHoldings', ETF_HOLDINGS_HEADERS);
+  const rows = normalizeDateCol_(sheet.getDataRange().getValues().slice(1), 0);
+
+  let latest = '';
+  rows.forEach((r) => { if (r[0] > latest) latest = r[0]; });
+
+  const bySector = {};
+  if (latest) {
+    rows.forEach((r) => {
+      if (r[0] !== latest) return;
+      const sid = r[1];
+      if (!bySector[sid]) bySector[sid] = [];
+      bySector[sid].push({ code: String(r[5]), name: String(r[6]), weight: Number(r[7]) || 0 });
+    });
+    Object.keys(bySector).forEach((k) => bySector[k].sort((a, b) => b.weight - a.weight));
+  }
+
+  const out = {};
+  SECTOR_CONFIG.forEach((sec) => {
+    out[sec.id] = (bySector[sec.id] && bySector[sec.id].length) ? bySector[sec.id] : sec.kr.slice();
+  });
+  return out;
+}
+
+/* ============================================================
    섹터 일별 히스토리 (일/월/연 차트용)
    ============================================================ */
 
-/* 시장(KR/US)을 행으로 분리해 저장한다 — 국장/미장 탭과 그대로 맞물린다.
-   수급은 국내 종목에만 존재하므로 US 행의 netFlow는 항상 0이다. */
-const SECTOR_DAILY_HEADERS = ['date', 'sectorId', 'market', 'netFlow', 'avgChangePct', 'stockCount'];
+/* 시장(KOSPI/KOSDAQ/US)을 행으로 분리해 저장한다.
+   수급은 국내 종목에만 존재하므로 US 행의 수급은 항상 0이다.
+   netFlow는 예전 정의(외국인+기관)를 유지하고, 3주체를 각각 따로 남긴다. */
+const SECTOR_DAILY_HEADERS = [
+  'date', 'sectorId', 'market',
+  'netFlow', 'frgnFlow', 'orgFlow', 'indiFlow',
+  'avgChangePct', 'stockCount',
+];
 
-const BACKFILL_KR_PAGES = 20; // frgn 페이지당 20거래일 → 약 400거래일
-const BACKFILL_US_PAGES = 7;  // pageSize 60(API 상한) → 약 420거래일
+const TREND_PAGE_DAYS = 10;    // trend API가 한 번에 주는 거래일 수
+const BACKFILL_TREND_PAGES = 40; // 10일 × 40 ≈ 400거래일
+const BACKFILL_US_PAGES = 7;   // pageSize 60(API 상한) → 약 420거래일
 const US_PRICE_PAGE_SIZE = 60; // 이 값을 넘기면 API가 에러 문자열을 돌려준다
-const FETCH_CHUNK = 20;       // 네이버에 한 번에 몰지 않도록 나눠 보낸다
+const FETCH_CHUNK = 20;        // 네이버에 한 번에 몰지 않도록 나눠 보낸다
+const QUOTE_BATCH = 20;        // 시세는 콤마로 묶어 한 번에 받는다
 
-/* refreshAll이 이미 종목마다 20거래일치 수급 이력을 받아놓고 최신 하루만 쓰고 버린다.
-   그걸 그대로 저장하므로 추가 네트워크 요청이 없다. 최근 20거래일을 매번 덮어써서
-   중간에 실행이 빠진 날짜도 저절로 메워진다. */
+function numOf_(s) {
+  return parseFloat(String(s == null ? '' : s).replace(/[,+%\s]/g, '')) || 0;
+}
+
+function trendUrl_(code, bizdate) {
+  return 'https://m.stock.naver.com/api/stock/' + code + '/trend' + (bizdate ? '?bizdate=' + bizdate : '');
+}
+
+/* 투자자별 매매동향 API. 개인·외국인·기관을 모두 주고 JSON이라
+   HTML 정규식 파싱보다 훨씬 덜 깨진다. 수량이므로 종가를 곱해 억원으로 환산한다.
+   반환: [{date, closePrice, frgnFlow, orgFlow, indiFlow}] 최신일 우선 */
+function parseTrendHistory_(text) {
+  let arr;
+  try { arr = JSON.parse(text); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  const out = [];
+  arr.forEach((it) => {
+    const bd = String(it.bizdate || '');
+    if (bd.length !== 8) return;
+    const close = numOf_(it.closePrice);
+    if (!close) return;
+    const toEok = (q) => Math.round((numOf_(q) * close) / 100000000);
+    out.push({
+      date: bd.slice(0, 4) + '-' + bd.slice(4, 6) + '-' + bd.slice(6, 8),
+      closePrice: close,
+      frgnFlow: toEok(it.foreignerPureBuyQuant),
+      orgFlow: toEok(it.organPureBuyQuant),
+      indiFlow: toEok(it.individualPureBuyQuant),
+    });
+  });
+  return out;
+}
+
+/* refreshAll이 이미 종목마다 수급 이력을 받아놓는다. 그걸 그대로 저장하므로
+   추가 네트워크 요청이 없다. 최근 며칠을 매번 덮어써서 실행이 빠진 날짜도 메워진다. */
 function logSectorDailyFromQuotes_(ss, quotes) {
   const byKey = {};
   SECTOR_CONFIG.forEach((sec) => {
-    sec.kr.forEach((s) => {
-      addKrDaily_(byKey, sec.id, quotes.krFlow[s.code]);
+    (quotes.krStocks[sec.id] || []).forEach((s) => {
+      addKrDaily_(byKey, sec.id, quotes.market[s.code] || 'KOSPI', quotes.krTrend[s.code]);
     });
   });
   if (!Object.keys(byKey).length) return;
   upsertSectorDaily_(getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS), byKey);
 }
 
-/* 등락률은 연속한 두 종가에서 직접 계산한다. 매매동향 페이지의 등락률 칸은
-   부호가 별도 스타일로만 표시돼 텍스트만으로는 방향을 알 수 없다. */
-function addKrDaily_(byKey, sectorId, hist) {
+/* 등락률은 연속한 두 종가로 직접 계산한다. trend API는 등락률 자체를 주지 않는다. */
+function addKrDaily_(byKey, sectorId, market, hist) {
   if (!hist || hist.length < 2) return;
   for (let i = 0; i < hist.length - 1; i++) {
     const cur = hist[i];
     const prev = hist[i + 1];
     if (!cur.date || !prev.closePrice) continue;
     const pct = +(((cur.closePrice / prev.closePrice) - 1) * 100).toFixed(2);
-    bucketAdd_(byKey, cur.date, sectorId, 'KR', cur.flow, pct);
+    bucketAdd_(byKey, cur.date, sectorId, market, cur, pct);
   }
 }
 
-function bucketAdd_(byKey, date, sectorId, market, flow, pct) {
+function bucketAdd_(byKey, date, sectorId, market, flows, pct) {
   const k = date + '|' + sectorId + '|' + market;
-  if (!byKey[k]) byKey[k] = { date: date, sectorId: sectorId, market: market, flow: 0, pcts: [] };
-  byKey[k].flow += flow || 0;
-  if (isFinite(pct)) byKey[k].pcts.push(pct);
+  if (!byKey[k]) {
+    byKey[k] = { date: date, sectorId: sectorId, market: market, frgn: 0, org: 0, indi: 0, pcts: [] };
+  }
+  const b = byKey[k];
+  if (flows) {
+    b.frgn += flows.frgnFlow || 0;
+    b.org += flows.orgFlow || 0;
+    b.indi += flows.indiFlow || 0;
+  }
+  if (isFinite(pct)) b.pcts.push(pct);
 }
 
 /* 시트는 'YYYY-MM-DD' 문자열을 날짜 셀로 자동 변환해서 읽을 때 Date 객체로 돌려준다.
@@ -689,7 +944,11 @@ function upsertSectorDaily_(sheet, byKey) {
   const added = [];
   Object.keys(byKey).forEach((k) => {
     const b = byKey[k];
-    const row = [b.date, b.sectorId, b.market, Math.round(b.flow), mean_(b.pcts), b.pcts.length];
+    const row = [
+      b.date, b.sectorId, b.market,
+      Math.round(b.frgn + b.org), Math.round(b.frgn), Math.round(b.org), Math.round(b.indi),
+      mean_(b.pcts), b.pcts.length,
+    ];
     if (idx[k] !== undefined) values[idx[k]] = row;
     else added.push(row);
   });
@@ -731,31 +990,43 @@ function parseUsPriceHistory_(text) {
   return out;
 }
 
-function backfillSector_(sec) {
+/* trend API는 bizdate를 커서로 그 날짜 이전 10거래일을 준다.
+   페이지마다 앞 페이지의 가장 오래된 날짜를 넘겨 거슬러 올라간다. */
+function fetchTrendDeep_(code, pages) {
+  const seen = {};
+  const hist = [];
+  let cursor = '';
+
+  for (let p = 0; p < pages; p++) {
+    let res;
+    try {
+      res = UrlFetchApp.fetch(trendUrl_(code, cursor), { muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } });
+    } catch (e) { break; }
+    const rows = parseTrendHistory_(res.getContentText());
+    if (!rows.length) break;
+
+    let added = 0;
+    rows.forEach((r) => {
+      if (seen[r.date]) return;
+      seen[r.date] = true;
+      hist.push(r);
+      added++;
+    });
+    if (!added) break;
+
+    cursor = hist[hist.length - 1].date.replace(/-/g, '');
+    Utilities.sleep(120);
+  }
+
+  hist.sort((a, b) => (a.date < b.date ? 1 : -1));
+  return hist;
+}
+
+function backfillSector_(sec, krStocks, marketOf) {
   const byKey = {};
 
-  sec.kr.forEach((s) => {
-    const reqs = [];
-    for (let p = 1; p <= BACKFILL_KR_PAGES; p++) {
-      reqs.push({
-        url: 'https://finance.naver.com/item/frgn.naver?code=' + s.code + '&page=' + p,
-        muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' },
-      });
-    }
-    const seen = {};
-    const hist = [];
-    fetchAllChunked_(reqs).forEach((res) => {
-      if (!res) return;
-      try {
-        parseKrFlowHistory_(res.getContentText()).forEach((h) => {
-          if (seen[h.date]) return;
-          seen[h.date] = true;
-          hist.push(h);
-        });
-      } catch (e) { /* 페이지 하나 실패는 건너뛴다 */ }
-    });
-    hist.sort((a, b) => (a.date < b.date ? 1 : -1));
-    addKrDaily_(byKey, sec.id, hist);
+  krStocks.forEach((s) => {
+    addKrDaily_(byKey, sec.id, marketOf[s.code] || 'KOSPI', fetchTrendDeep_(s.code, BACKFILL_TREND_PAGES));
   });
 
   sec.us.forEach((s) => {
@@ -773,7 +1044,7 @@ function backfillSector_(sec) {
         parseUsPriceHistory_(res.getContentText()).forEach((d) => {
           if (seen[d.date]) return;
           seen[d.date] = true;
-          bucketAdd_(byKey, d.date, sec.id, 'US', 0, d.changePct);
+          bucketAdd_(byKey, d.date, sec.id, 'US', null, d.changePct);
         });
       } catch (e) { /* 페이지 하나 실패는 건너뛴다 */ }
     });
@@ -791,14 +1062,17 @@ function backfillSectorDaily_(maxMs) {
   const started = Date.now();
   const log = [];
 
+  const active = activeKrStocks_(ss);
+  const marketOf = loadMarketMap_(ss);
+
   let cursor = parseInt(props.getProperty('BACKFILL_CURSOR') || '0', 10);
   if (!(cursor >= 0)) cursor = 0;
 
   while (cursor < SECTOR_CONFIG.length && Date.now() - started < maxMs) {
     const sec = SECTOR_CONFIG[cursor];
-    const byKey = backfillSector_(sec);
+    const byKey = backfillSector_(sec, active[sec.id] || [], marketOf);
     upsertSectorDaily_(sheet, byKey);
-    log.push('✅ ' + sec.name + ' — ' + Object.keys(byKey).length + '행');
+    log.push('✅ ' + sec.name + ' — ' + Object.keys(byKey).length + '행 (' + (active[sec.id] || []).length + '종목)');
     cursor++;
     props.setProperty('BACKFILL_CURSOR', String(cursor));
   }
@@ -826,7 +1100,7 @@ function syncUsDaily() {
     if (!res) return;
     try {
       parseUsPriceHistory_(res.getContentText()).forEach((d) => {
-        bucketAdd_(byKey, d.date, meta[i], 'US', 0, d.changePct);
+        bucketAdd_(byKey, d.date, meta[i], 'US', null, d.changePct);
       });
     } catch (e) { /* 무시 */ }
   });
@@ -840,7 +1114,8 @@ function syncUsDaily() {
    일/월/연 집계 조회
    ============================================================ */
 
-const HISTORY_LIMIT = { day: 120, month: 36, year: 20 };
+const HISTORY_LIMIT = { day: 400, month: 60, year: 20 };
+const FLOW_COL = { net: 3, frgn: 4, org: 5, indi: 6 };
 
 function bucketKey_(date, period) {
   if (period === 'year') return date.slice(0, 4);
@@ -848,15 +1123,25 @@ function bucketKey_(date, period) {
   return date;
 }
 
+function marketMatches_(mk, filter) {
+  if (filter === 'all') return true;
+  if (filter === 'kr') return mk === 'KOSPI' || mk === 'KOSDAQ';
+  if (filter === 'kospi') return mk === 'KOSPI';
+  if (filter === 'kosdaq') return mk === 'KOSDAQ';
+  if (filter === 'us') return mk === 'US';
+  return true;
+}
+
 /* 수급은 합계, 등락률은 누적 수익률(곱), 뉴스는 합계로 접는다.
    등락률을 평균이나 합으로 접으면 기간 수익률이 아닌 값이 나온다. */
-function getHistory_(period, market, metric) {
+function getHistory_(period, market, metric, investor, from, to) {
   period = HISTORY_LIMIT[period] ? period : 'day';
-  market = (market === 'kr' || market === 'us') ? market : 'all';
+  market = ['kr', 'us', 'kospi', 'kosdaq'].indexOf(market) > -1 ? market : 'all';
   metric = (metric === 'price' || metric === 'news') ? metric : 'flow';
+  const flowCol = FLOW_COL[investor] !== undefined ? FLOW_COL[investor] : FLOW_COL.net;
 
   const ss = getDb_();
-  const acc = {}; // sectorId → bucket → {flow, pctByDate:{date:{sum,n}}, news}
+  const acc = {};
   const bucketSet = {};
 
   const touch = (sectorId, bucket) => {
@@ -866,29 +1151,29 @@ function getHistory_(period, market, metric) {
     return acc[sectorId][bucket];
   };
 
+  const inRange = (d) => (!from || d >= from) && (!to || d <= to);
+
   if (metric === 'news') {
     const sheet = getOrCreateSheet_(ss, 'NewsDailyLog', ['date', 'sectorId', 'count']);
     sheet.getDataRange().getValues().slice(1).forEach((r) => {
       const date = asDateStr_(r[0]);
-      if (!date) return;
+      if (!date || !inRange(date)) return;
       touch(r[1], bucketKey_(date, period)).news += Number(r[2]) || 0;
     });
   } else {
     const sheet = getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS);
     sheet.getDataRange().getValues().slice(1).forEach((r) => {
       const date = asDateStr_(r[0]);
-      if (!date) return;
-      const mk = String(r[2] || '');
-      if (market === 'kr' && mk !== 'KR') return;
-      if (market === 'us' && mk !== 'US') return;
+      if (!date || !inRange(date)) return;
+      if (!marketMatches_(String(r[2] || ''), market)) return;
 
       const b = touch(r[1], bucketKey_(date, period));
-      b.flow += Number(r[3]) || 0;
-      // 같은 날 KR/US 두 행이 오면 종목 수로 가중해 하루치 등락률을 하나로 만든다
-      const n = Number(r[5]) || 0;
+      b.flow += Number(r[flowCol]) || 0;
+      // 같은 날 여러 시장 행이 오면 종목 수로 가중해 하루치 등락률을 하나로 만든다
+      const n = Number(r[8]) || 0;
       if (n > 0) {
         if (!b.pctByDate[date]) b.pctByDate[date] = { sum: 0, n: 0 };
-        b.pctByDate[date].sum += (Number(r[4]) || 0) * n;
+        b.pctByDate[date].sum += (Number(r[7]) || 0) * n;
         b.pctByDate[date].n += n;
       }
     });
@@ -919,11 +1204,27 @@ function getHistory_(period, market, metric) {
     period: period,
     market: market,
     metric: metric,
+    investor: investor || 'net',
     unit: metric === 'flow' ? '억원' : metric === 'price' ? '%' : '건',
     buckets: buckets,
     series: series,
+    constituents: historyConstituents_(ss),
     flowAvailable: market !== 'us',
   };
+}
+
+/* 어떤 종목으로 집계했는지 화면에서 확인할 수 있게 같이 내려보낸다 */
+function historyConstituents_(ss) {
+  const active = activeKrStocks_(ss);
+  const out = {};
+  SECTOR_CONFIG.forEach((sec) => {
+    out[sec.id] = {
+      etf: sec.etf ? sec.etf.name : '',
+      kr: (active[sec.id] || []).map((s) => s.name),
+      us: sec.us.map((s) => s.name),
+    };
+  });
+  return out;
 }
 
 /* ============================================================
@@ -1000,6 +1301,10 @@ function getDashboard_() {
     return {
       id: o.id, name: o.name, icon: o.icon,
       netFlow: Number(o.netFlow) || 0,
+      frgnFlow: Number(o.frgnFlow) || 0,
+      orgFlow: Number(o.orgFlow) || 0,
+      indiFlow: Number(o.indiFlow) || 0,
+      etfName: o.etfName || '',
       flowChangePct: Number(o.flowChangePct) || 0,
       flowDate: asDateStr_(o.flowDate),
       avgChangePct: Number(o.avgChangePct) || 0,
@@ -1333,4 +1638,8 @@ function writeRows_(sheet, rows) {
   const lastRow = sheet.getLastRow();
   if (lastRow > 1) sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).clearContent();
   if (rows.length) sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+function hasEtfHoldings_(ss) {
+  return getOrCreateSheet_(ss, 'EtfHoldings', ETF_HOLDINGS_HEADERS).getLastRow() > 1;
 }

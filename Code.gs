@@ -165,6 +165,7 @@ function doGet(e) {
     if (action === 'status') return jsonOut_(systemStatus_());
     if (action === 'history') return jsonOut_(getHistory_(params.period, params.market, params.metric, params.investor, params.from, params.to));
     if (action === 'syncEtf') return jsonOut_(syncEtfHoldings());
+    if (action === 'profile') return jsonOut_(profileRefresh_());
     if (action === 'backfill') {
       const r = backfillSectorDaily_(4.5 * 60 * 1000);
       return htmlOut_(r.finished ? '백필 완료' : '백필 진행 중',
@@ -1937,6 +1938,42 @@ function migrateAlertLog_() {
   const width = sheet.getLastColumn();
   if (width >= ALERT_HEADERS.length) return;
   sheet.getRange(1, 1, 1, ALERT_HEADERS.length).setValues([ALERT_HEADERS]);
+}
+
+/* 어디서 시간이 가는지 실측한다. 추측으로 최적화하면 엉뚱한 데를 고친다. */
+function profileRefresh_() {
+  const t = [];
+  let last = Date.now();
+  const mark = (label) => { const now = Date.now(); t.push([label, now - last]); last = now; };
+
+  const ss = getDb_();
+  mark('시트 열기');
+  const quotes = fetchAllMarketData_(ss);
+  mark('시세·수급 수집');
+  const results = SECTOR_CONFIG.map((sec) => buildSectorSnapshot_(ss, sec, quotes));
+  mark('스냅샷 생성(뉴스 포함)');
+
+  const sectorSheet = getOrCreateSheet_(ss, 'SectorSnapshot', SECTOR_HEADERS);
+  writeRows_(sectorSheet, results.map((r) => [
+    r.id, r.name, r.icon, r.netFlow, r.flowChangePct, r.flowDate,
+    r.avgChangePct, r.krChangePct, r.usChangePct,
+    r.newsVolume, r.newsKr, r.newsUs, r.newsChangePct, r.newsBaselineReady,
+    JSON.stringify(r.stocks), new Date().toISOString(),
+    r.frgnFlow, r.orgFlow, r.indiFlow, r.etfName, r.newsRaw, JSON.stringify(r.newsItems || []),
+  ]));
+  mark('스냅샷 쓰기');
+
+  logDailySectorPct_(ss, results);
+  mark('일별 등락률 로그');
+  logSectorDailyFromQuotes_(ss, quotes);
+  mark('SectorDaily upsert');
+  detectDropEvents_(ss, results);
+  mark('하락 이벤트');
+  checkAlerts_(ss, results, quotes);
+  mark('알림');
+
+  const total = t.reduce((a, x) => a + x[1], 0);
+  return { totalMs: total, steps: t, sectorDailyRows: getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS).getLastRow() - 1 };
 }
 
 function hasEtfHoldings_(ss) {

@@ -509,6 +509,11 @@ a.alert-news-title:hover { text-decoration: underline; }
   font-size: 12px; font-weight: 800; color: #fff;
   padding: 3px 10px; border-radius: 999px;
 }
+.sr-table td, .sr-table th { padding: 8px 7px; font-size: 12.5px; }
+.sr-table th { font-size: 10.5px; line-height: 1.25; }
+.pc-hi { color: var(--danger); font-weight: 800; }
+.pc-mid { color: #b45309; font-weight: 700; }
+.pc-lo { color: var(--text-sub); }
 .inv-split {
   display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
   margin-top: 6px;

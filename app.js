@@ -452,6 +452,85 @@ function sectorCardHtml(s) {
    섹터 위험도 (검증 통과) + 수급 관측
    ============================================================ */
 
+let SRISK = null;
+let sriskState = 'idle';
+
+/* 종목별 낙폭 확률은 GAS가 매일 08시에 계산해 시트에 넣어둔다.
+   여기서는 읽기만 하므로 4초면 온다 (실시간 계산이면 2~3분). */
+async function fetchStockRisk() {
+  if (SRISK || !isConfigured()) return;
+  sriskState = 'loading';
+  try {
+    const res = await fetch(gasUrl('stockrisk'));
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    SRISK = data;
+    sriskState = 'ready';
+  } catch (err) {
+    sriskState = 'error';
+  }
+}
+
+const SR_BAND_CLASS = { '매우높음': 'band-high', '높음': 'band-high', '보통': 'band-mid',
+                        '낮음': 'band-low', '매우낮음': 'band-low' };
+
+/* 확률이 높을수록 진하게. 색만으로 판단하지 않도록 숫자를 항상 같이 둔다. */
+function probCell(p) {
+  const cls = p >= 70 ? 'pc-hi' : p >= 40 ? 'pc-mid' : 'pc-lo';
+  return `<td class="num ${cls}">${p}%</td>`;
+}
+
+function stockRiskHtml() {
+  if (sriskState === 'loading') return `<div class="empty-state">종목별 확률 불러오는 중…</div>`;
+  if (!SRISK || !SRISK.stocks || !SRISK.stocks.length) {
+    return `<div class="signal-note">종목별 확률이 아직 계산되지 않았어요.
+      <a class="banner-link" href="${gasUrl('syncStockRisk')}" target="_blank" rel="noopener">지금 계산하기</a>
+      를 한 번 열면 채워집니다 (30초).</div>`;
+  }
+  const b = SRISK.basis || {};
+  const rows = SRISK.stocks.map((s) => `
+    <tr>
+      <td><b>${s.name}</b><div class="exp-sub">${s.market}</div></td>
+      <td class="num">${s.vol60}%</td>
+      <td><span class="band-chip ${SR_BAND_CLASS[s.band] || ''}">${s.band}</span></td>
+      ${probCell(s.p['10'][1])}
+      ${probCell(s.p['10'][2])}
+      ${probCell(s.p['20'][1])}
+      ${probCell(s.p['20'][2])}
+      <td class="num">${s.dd60}%</td>
+    </tr>`).join('');
+  return `
+    <div class="section-title">종목별 하락 확률 · ${SRISK.asOf} 기준</div>
+    <div class="card exp-verdict">
+      <div class="exp-why" style="margin-top:0;padding-top:0;border-top:none">
+        <b>읽는 법</b> — "10일 7%"는 <b>앞으로 10거래일 안에 고점 대비 7% 넘게 빠질 확률</b>입니다.
+        오늘 사서 열흘 안에 겪을 수 있는 하락폭으로 보시면 됩니다.<br>
+        방향 예측이 아닙니다. 크게 빠질 확률이 높다는 건 크게 오를 확률도 높다는 뜻입니다.
+        <b>비중과 손절선을 정하는 데 쓰세요.</b>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="exp-table sr-table">
+        <thead>
+          <tr>
+            <th>종목</th><th class="num">변동성</th><th>구간</th>
+            <th class="num">10일<br>7%</th><th class="num">10일<br>10%</th>
+            <th class="num">20일<br>7%</th><th class="num">20일<br>10%</th>
+            <th class="num">최근<br>낙폭</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="signal-note">
+      확률은 60일 실현변동성 5구간별로 실측한 값입니다.
+      학습 ${b.train || ''} → 검증 ${b.test || ''}.
+      ${b.error || ''}<br>
+      같은 구간이면 확률이 같습니다. 구간 안에서의 순서는 변동성 숫자로 보세요.
+      변동성 구간은 평균 31거래일에 한 번 바뀌므로 하루 한 번만 갱신합니다.
+    </div>`;
+}
+
 let RISK = null;
 let riskState = 'idle';
 
@@ -552,8 +631,9 @@ function renderRiskPage(el) {
       <div class="risk-overall-sub">높음 ${cnt['높음']} · 보통 ${cnt['보통']} · 낮음 ${cnt['낮음']} (전체 ${total}개 섹터)</div>
     </div>
     ${cards}
+    ${stockRiskHtml()}
     <div class="signal-note">
-      순위는 60일 실현변동성(연율) 기준입니다. 구간은 ${RISK.cuts[0]}% 미만 낮음 /
+      위 섹터 순위는 60일 실현변동성(연율) 기준입니다. 구간은 ${RISK.cuts[0]}% 미만 낮음 /
       ${RISK.cuts[1]}% 이상 높음.<br>
       검증: 홀드아웃 ${b.holdout} 구간에서 ${b.note}. 이후 변동성 순위상관
       <b>+${b.icVol}</b> (t ${b.tVol}), 최대낙폭 <b>+${b.icDd}</b> (t ${b.tDd}).
@@ -1515,6 +1595,8 @@ function init() {
       }
       if (currentPage === 'risk') {
         await fetchRisk(render);
+        await fetchStockRisk();
+        render();
         render();
       }
     });
@@ -1532,8 +1614,10 @@ function init() {
         render();
       }
       if (currentPage === 'risk') {
-        RISK = null;
+        RISK = null; SRISK = null;
         await fetchRisk(render);
+        await fetchStockRisk();
+        render();
         render();
       }
     });

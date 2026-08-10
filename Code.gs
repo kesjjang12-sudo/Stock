@@ -171,6 +171,7 @@ function doGet(e) {
     if (action === 'syncStockRisk') return jsonOut_(syncStockRisk());
     if (action === 'syncUniverse') return jsonOut_(syncUniverse());
     if (action === 'closes') return jsonOut_(closesReport_());
+    if (action === 'probe') return jsonOut_(probeSise_(params.code || '005930'));
     if (action === 'target') return jsonOut_(calculateTargetScore());
     if (action === 'rows') return jsonOut_(rawSectorDaily_(params.sector, params.from, params.to));
     if (action === 'backfill') {
@@ -2415,6 +2416,18 @@ function refreshCloses_(ss, uni, deadline) {
   });
   writeRows_(sheet, rows);
   return { store: store, pending: pending, fetched: fetched };
+}
+
+/* 시세 API가 GAS에서 실제로 무엇을 돌려주는지 눈으로 본다.
+   응답 본문을 안 보고 원인을 추측하다 두 번 헛짚었다. */
+function probeSise_(code) {
+  const url = siseUrl_(padKrCode_(code), COLD_DAYS);
+  let res;
+  try { res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } }); }
+  catch (e) { return { url: url, error: String(e) }; }
+  const body = res.getContentText();
+  return { url: url, status: res.getResponseCode(), length: body.length,
+    head: body.slice(0, 300), parsed: parseSiseCloses_(body).length };
 }
 
 /* 어떤 종목이 왜 확률표에 안 나오는지 보려면 보관된 종가 개수를 봐야 한다.

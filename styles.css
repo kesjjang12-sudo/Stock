@@ -475,3 +475,31 @@ a.alert-news-title:hover { text-decoration: underline; }
   .topbar { margin: 0 -14px; padding: 0 14px; }
   .sector-grid { grid-template-columns: 1fr; }
 }
+
+/* ---------- 섹터 점수 ---------- */
+.warn-box {
+  background: var(--danger-tint); border-radius: var(--radius-md);
+  padding: 14px 16px; margin-bottom: 4px;
+}
+.warn-title { font-size: 14px; font-weight: 800; color: var(--danger); }
+.warn-body { margin-top: 6px; font-size: 12.5px; color: var(--text-sub); line-height: 1.6; }
+
+.score-card { padding: 16px 18px; margin-bottom: 12px; }
+.score-head { display: flex; align-items: center; gap: 10px; }
+.score-rank {
+  width: 22px; height: 22px; border-radius: 6px; flex-shrink: 0;
+  background: var(--card-alt); color: var(--text-sub);
+  font-size: 12px; font-weight: 800; display: flex; align-items: center; justify-content: center;
+}
+.score-name { flex: 1; font-size: 15px; font-weight: 700; }
+.score-value { font-size: 16px; font-weight: 800; }
+.score-factors { margin-top: 12px; display: flex; flex-direction: column; gap: 7px; }
+.zrow { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.zlabel { width: 74px; flex-shrink: 0; color: var(--text-sub); }
+.zval { width: 44px; flex-shrink: 0; text-align: right; font-weight: 700; }
+.zbar { position: relative; flex: 1; height: 8px; background: var(--card-alt); border-radius: 4px; }
+.zbar-zero { position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--border); }
+.zbar-fill { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.zbar-up { background: var(--up); }
+.zbar-down { background: var(--down); }
+.score-detail { margin-top: 12px; font-size: 11.5px; color: var(--text-faint); line-height: 1.6; }

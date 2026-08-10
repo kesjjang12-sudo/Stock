@@ -166,6 +166,7 @@ function doGet(e) {
     if (action === 'history') return jsonOut_(getHistory_(params.period, params.market, params.metric, params.investor, params.from, params.to));
     if (action === 'syncEtf') return jsonOut_(syncEtfHoldings());
     if (action === 'profile') return jsonOut_(profileRefresh_());
+    if (action === 'score') return jsonOut_(sectorScores_(params.market));
     if (action === 'backfill') {
       const r = backfillSectorDaily_(4.5 * 60 * 1000);
       return htmlOut_(r.finished ? '백필 완료' : '백필 진행 중',
@@ -1477,6 +1478,132 @@ function historyConstituents_(ss) {
     };
   });
   return out;
+}
+
+/* ============================================================
+   섹터 점수 (참고 지표 — 예측력 검증 실패)
+   ============================================================ */
+
+/* 3.1년 · 62종목으로 백테스트한 결과 아래 팩터 중 어느 것도 20거래일 뒤
+   수익률을 유의하게 예측하지 못했다 (IC 전부 0.03 미만, t < 2).
+   그래서 이 점수는 "지금 어떤 상태인가"를 한 줄로 요약하는 용도이지
+   매수 신호가 아니다. 화면에도 그렇게 표시한다. */
+const SCORE_FACTORS = [
+  { key: 'flow',  label: '수급 강도',    note: '20일 누적 외인+기관 ÷ 평소 규모' },
+  { key: 'pers',  label: '수급 지속성',  note: '최근 20일 중 순매수 일수' },
+  { key: 'mom',   label: '모멘텀',       note: '60일 누적 등락률' },
+  { key: 'accum', label: '축적',         note: '가격은 빠졌는데 수급은 들어옴' },
+  { key: 'indi',  label: '개인 역지표',  note: '개인 순매도일수록 높음' },
+];
+
+const SCORE_CACHE_SEC = 3 * 3600;
+
+function zmap_(raw) {
+  const ks = Object.keys(raw);
+  const vals = ks.map((k) => raw[k]).filter((v) => isFinite(v));
+  if (vals.length < 3) return {};
+  const m = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const sd = Math.sqrt(vals.reduce((a, b) => a + (b - m) * (b - m), 0) / vals.length);
+  const out = {};
+  ks.forEach((k) => {
+    const z = sd ? (raw[k] - m) / sd : 0;
+    out[k] = Math.max(-3, Math.min(3, z));
+  });
+  return out;
+}
+
+function sectorScores_(market) {
+  market = ['kr', 'kospi', 'kosdaq'].indexOf(market) > -1 ? market : 'kr';
+  const cache = CacheService.getScriptCache();
+  const ck = 'score|' + historyCacheVersion_() + '|' + market;
+  try {
+    const hit = cache.get(ck);
+    if (hit) return JSON.parse(hit);
+  } catch (e) { /* 무시 */ }
+
+  const ss = getDb_();
+  const rows = getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS).getDataRange().getValues().slice(1);
+
+  // 섹터별 일자 시계열로 접는다 (같은 날 코스피/코스닥이 따로 오므로 합친다)
+  const bySec = {};
+  rows.forEach((r) => {
+    const date = asDateStr_(r[0]);
+    if (!date || !marketMatches_(String(r[2] || ''), market)) return;
+    const sid = r[1];
+    if (!bySec[sid]) bySec[sid] = {};
+    const cur = bySec[sid][date] || { net: 0, indi: 0, pctSum: 0, n: 0 };
+    cur.net += Number(r[3]) || 0;
+    cur.indi += Number(r[6]) || 0;
+    const n = Number(r[8]) || 0;
+    cur.pctSum += (Number(r[7]) || 0) * n;
+    cur.n += n;
+    bySec[sid][date] = cur;
+  });
+
+  const raw = { flow: {}, pers: {}, mom: {}, accum: {}, indi: {} };
+  const detail = {};
+  const ids = [];
+
+  SECTOR_CONFIG.forEach((sec) => {
+    const byDate = bySec[sec.id];
+    if (!byDate) return;
+    const dates = Object.keys(byDate).sort();
+    if (dates.length < 60) return;
+    ids.push(sec.id);
+
+    const last = (n) => dates.slice(-n).map((d) => byDate[d]);
+    const w20 = last(20);
+    const w60 = last(60);
+
+    const net20 = w20.reduce((a, x) => a + x.net, 0);
+    const absMean = w60.reduce((a, x) => a + Math.abs(x.net), 0) / w60.length || 1;
+    const buyDays = w20.filter((x) => x.net > 0).length;
+    const cum = (arr) => arr.reduce((acc, x) => acc * (1 + (x.n ? x.pctSum / x.n : 0) / 100), 1);
+    const mom60 = (cum(w60) - 1) * 100;
+    const ret20 = (cum(w20) - 1) * 100;
+    const indi20 = -w20.reduce((a, x) => a + x.indi, 0);
+
+    raw.flow[sec.id] = net20 / absMean;
+    raw.pers[sec.id] = buyDays / w20.length - 0.5;
+    raw.mom[sec.id] = mom60;
+    raw.indi[sec.id] = indi20;
+    detail[sec.id] = {
+      net20: Math.round(net20), buyDays: buyDays, mom60: +mom60.toFixed(1),
+      ret20: +ret20.toFixed(1), indi20: Math.round(-indi20),
+      lastDate: dates[dates.length - 1],
+    };
+  });
+
+  const zFlow = zmap_(raw.flow);
+  const zRet = zmap_((function () { const o = {}; ids.forEach((i) => { o[i] = -detail[i].ret20; }); return o; })());
+  ids.forEach((i) => { raw.accum[i] = Math.min(zFlow[i] || 0, zRet[i] || 0); });
+
+  const z = { flow: zFlow, pers: zmap_(raw.pers), mom: zmap_(raw.mom), accum: zmap_(raw.accum), indi: zmap_(raw.indi) };
+
+  const out = ids.map((id) => {
+    const sec = SECTOR_CONFIG.filter((s) => s.id === id)[0];
+    const factors = SCORE_FACTORS.map((f) => ({
+      key: f.key, label: f.label, note: f.note,
+      z: +((z[f.key][id] || 0)).toFixed(2),
+    }));
+    const mean = factors.reduce((a, f) => a + f.z, 0) / factors.length;
+    return {
+      sectorId: id, name: sec.name, icon: sec.icon,
+      score: +mean.toFixed(2),
+      factors: factors,
+      detail: detail[id],
+    };
+  }).sort((a, b) => b.score - a.score);
+
+  const res = {
+    market: market,
+    asOf: out.length ? out[0].detail.lastDate : '',
+    validated: false,
+    caveat: '3.1년·62종목 백테스트에서 20거래일 수익률 예측력이 확인되지 않았습니다 (IC<0.03). 매수 신호가 아니라 현재 상태 요약입니다.',
+    sectors: out,
+  };
+  try { cache.put(ck, JSON.stringify(res), SCORE_CACHE_SEC); } catch (e) { /* 무시 */ }
+  return res;
 }
 
 /* ============================================================

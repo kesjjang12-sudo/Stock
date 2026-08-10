@@ -195,6 +195,7 @@ function render() {
   el.innerHTML = '';
   if (currentPage === 'flow') renderFlowPage(el);
   else if (currentPage === 'alerts') renderAlertsPage(el);
+  else if (currentPage === 'score') renderScorePage(el);
   else if (currentPage === 'trend') renderTrendPage(el);
   else if (currentPage === 'history') renderHistoryPage(el);
   else if (currentPage === 'signal') renderSignalPage(el);
@@ -427,6 +428,91 @@ function sectorCardHtml(s) {
         `).join('')}
       </div>
     </div>
+  `;
+}
+
+/* ============================================================
+   섹터 점수
+   ============================================================ */
+
+let SCORE = null;
+let scoreState = 'idle';
+
+async function fetchScore(onLoading) {
+  const mk = isKrFilter_(marketFilter) ? marketFilter : 'kr';
+  if (SCORE && SCORE.market === mk) { scoreState = 'ready'; return; }
+  if (!isConfigured()) { scoreState = 'error'; return; }
+  scoreState = 'loading';
+  if (onLoading) onLoading();
+  try {
+    const res = await fetch(`${gasUrl('score')}&market=${mk}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    SCORE = data;
+    scoreState = 'ready';
+  } catch (err) {
+    scoreState = 'error';
+  }
+}
+
+function scoreBar(z) {
+  // -3~+3을 0~100%로 옮기고 0선을 가운데 둔다
+  const pct = Math.max(0, Math.min(100, (z + 3) / 6 * 100));
+  const mid = 50;
+  const left = Math.min(pct, mid);
+  const width = Math.abs(pct - mid);
+  return `<div class="zbar"><div class="zbar-zero"></div>
+    <div class="zbar-fill ${z >= 0 ? 'zbar-up' : 'zbar-down'}" style="left:${left}%;width:${width}%"></div></div>`;
+}
+
+function renderScorePage(el) {
+  if (scoreState === 'loading' || scoreState === 'idle') {
+    el.innerHTML = `<div class="section-title">섹터 점수</div><div class="empty-state">계산 중이에요…</div>`;
+    return;
+  }
+  if (scoreState === 'error' || !SCORE) {
+    el.innerHTML = `<div class="section-title">섹터 점수</div>
+      <div class="empty-state"><div class="empty-icon">⚠️</div>점수를 불러오지 못했어요. GAS를 최신 코드로 배포했는지 확인해주세요.</div>`;
+    return;
+  }
+  if (marketFilter === 'us') {
+    el.innerHTML = `<div class="section-title">섹터 점수</div>
+      <div class="empty-state"><div class="empty-icon">🇺🇸</div>점수는 수급을 쓰기 때문에 국장만 계산됩니다.</div>`;
+    return;
+  }
+
+  const cards = SCORE.sectors.map((s, i) => `
+    <div class="card score-card">
+      <div class="score-head">
+        <div class="score-rank">${i + 1}</div>
+        <div class="score-name">${s.icon} ${s.name}</div>
+        <div class="score-value ${s.score >= 0 ? 'val-up' : 'val-down'}">${s.score >= 0 ? '+' : ''}${s.score.toFixed(2)}σ</div>
+      </div>
+      <div class="score-factors">
+        ${s.factors.map((f) => `
+          <div class="zrow">
+            <span class="zlabel">${f.label}</span>
+            ${scoreBar(f.z)}
+            <span class="zval ${f.z >= 0 ? 'val-up' : 'val-down'}">${f.z >= 0 ? '+' : ''}${f.z.toFixed(2)}</span>
+          </div>`).join('')}
+      </div>
+      <div class="score-detail">
+        20일 수급 ${fmtFlow(s.detail.net20)} · 순매수 ${s.detail.buyDays}/20일 ·
+        60일 ${fmtPct(s.detail.mom60)} · 20일 ${fmtPct(s.detail.ret20)} ·
+        개인 ${fmtFlow(s.detail.indi20)}
+      </div>
+    </div>`).join('');
+
+  el.innerHTML = `
+    <div class="warn-box">
+      <div class="warn-title">⚠️ 매수 신호가 아닙니다</div>
+      <div class="warn-body">${SCORE.caveat}<br>
+      숫자와 근거는 실제 데이터지만, 이 점수가 높다고 오른다는 검증은 <b>실패했습니다</b>.
+      "지금 어느 섹터에 무슨 일이 벌어지고 있나"를 한 줄로 요약하는 용도로만 보세요.</div>
+    </div>
+    <div class="section-title">${MARKET_LABEL[isKrFilter_(marketFilter) ? marketFilter : 'kr']} 섹터 점수 · ${SCORE.asOf} 기준</div>
+    ${cards}
+    <div class="signal-note">점수 = 5개 팩터 z값의 평균. z는 섹터 간 상대값이라 ±0에 가까우면 평범, +1σ면 상위권이라는 뜻입니다.</div>
   `;
 }
 
@@ -1241,6 +1327,10 @@ function init() {
         await fetchTrend(render);
         render();
       }
+      if (currentPage === 'score') {
+        await fetchScore(render);
+        render();
+      }
     });
   });
 
@@ -1253,6 +1343,11 @@ function init() {
       render();
       if (currentPage === 'trend') {
         await fetchTrend(render);
+        render();
+      }
+      if (currentPage === 'score') {
+        SCORE = null;
+        await fetchScore(render);
         render();
       }
     });

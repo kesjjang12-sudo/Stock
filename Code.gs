@@ -207,6 +207,7 @@ function setup() {
   const out = [];
 
   migrateAlertLog_();
+  sortSectorDaily_(getOrCreateSheet_(getDb_(), 'SectorDaily', SECTOR_DAILY_HEADERS));
 
   setupTrigger();
   out.push('✅ 자동 갱신 트리거 등록됨 (' + REFRESH_INTERVAL_MIN + '분마다)');
@@ -1024,7 +1025,7 @@ function logSectorDailyFromQuotes_(ss, quotes) {
     });
   });
   if (!Object.keys(byKey).length) return;
-  upsertSectorDaily_(getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS), byKey);
+  upsertSectorDailyTail_(getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS), byKey);
 }
 
 /* 등락률은 연속한 두 종가로 직접 계산한다. trend API는 등락률 자체를 주지 않는다. */
@@ -1076,6 +1077,55 @@ function padKrCode_(v) {
 function normalizeDateCol_(rows, col) {
   rows.forEach((r) => { r[col] = asDateStr_(r[col]); });
   return rows;
+}
+
+/* refreshAll은 최근 10거래일만 건드리는데 7천 행 전체를 읽고 다시 쓰느라
+   한 번에 7초씩 썼다. 시트를 날짜순으로 정렬해두면 최근 날짜가 끝에 몰리므로
+   꼬리 일부만 읽고 쓰면 된다. */
+const DAILY_TAIL_ROWS = 800;
+
+function sortSectorDaily_(sheet) {
+  const last = sheet.getLastRow();
+  if (last < 3) return;
+  sheet.getRange(2, 1, last - 1, SECTOR_DAILY_HEADERS.length).sort([{ column: 1, ascending: true }]);
+}
+
+function upsertSectorDailyTail_(sheet, byKey) {
+  const W = SECTOR_DAILY_HEADERS.length;
+  const last = sheet.getLastRow();
+  const n = Math.min(DAILY_TAIL_ROWS, Math.max(0, last - 1));
+  if (!n) return upsertSectorDaily_(sheet, byKey);
+
+  const startRow = last - n + 1;
+  const values = sheet.getRange(startRow, 1, n, W).getValues();
+  const idx = {};
+  let minDate = '9999-99-99';
+  values.forEach((r, i) => {
+    r[0] = asDateStr_(r[0]);
+    if (r[0] && r[0] < minDate) minDate = r[0];
+    idx[r[0] + '|' + r[1] + '|' + r[2]] = i;
+  });
+
+  // 꼬리가 날짜순이 아니면 앞쪽에 같은 키가 숨어 있을 수 있다 → 안전하게 전체 경로
+  if (!(values[0][0] <= values[n - 1][0])) return upsertSectorDaily_(sheet, byKey);
+
+  const added = [];
+  let dirty = false;
+  const keys = Object.keys(byKey);
+  for (let i = 0; i < keys.length; i++) {
+    const b = byKey[keys[i]];
+    const row = [
+      b.date, b.sectorId, b.market,
+      Math.round(b.frgn + b.org), Math.round(b.frgn), Math.round(b.org), Math.round(b.indi),
+      mean_(b.pcts), b.pcts.length,
+    ];
+    if (idx[keys[i]] !== undefined) { values[idx[keys[i]]] = row; dirty = true; }
+    else if (b.date >= minDate) added.push(row);
+    else return upsertSectorDaily_(sheet, byKey); // 꼬리 밖 과거 날짜
+  }
+
+  if (dirty) sheet.getRange(startRow, 1, n, W).setValues(values);
+  if (added.length) sheet.getRange(last + 1, 1, added.length, W).setValues(added);
 }
 
 function upsertSectorDaily_(sheet, byKey) {
@@ -1226,7 +1276,10 @@ function backfillSectorDaily_(maxMs) {
 
   invalidateHistoryCache_();
   const finished = cursor >= SECTOR_CONFIG.length;
-  if (finished) props.deleteProperty('BACKFILL_CURSOR');
+  if (finished) {
+    props.deleteProperty('BACKFILL_CURSOR');
+    sortSectorDaily_(sheet);
+  }
   return { finished: finished, done: cursor, total: SECTOR_CONFIG.length, log: log };
 }
 

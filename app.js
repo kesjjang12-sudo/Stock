@@ -475,41 +475,69 @@ const SR_BAND_CLASS = ['band-low', 'band-low', 'band-low', 'band-mid',
                        'band-mid', 'band-high', 'band-high', 'band-high'];
 
 /* 확률이 높을수록 진하게. 색만으로 판단하지 않도록 숫자를 항상 같이 둔다. */
-function probCell(p) {
+function probCell(p, extra) {
   const cls = p >= 50 ? 'pc-hi' : p >= 25 ? 'pc-mid' : 'pc-lo';
-  return `<td class="num ${cls}">${p}%</td>`;
+  return `<td class="num ${cls}${extra ? ' ' + extra : ''}">${p}%</td>`;
 }
 
-function stockRiskHtml() {
-  if (sriskState === 'loading') return `<div class="empty-state">종목별 확률 불러오는 중…</div>`;
-  if (!SRISK || !SRISK.stocks || !SRISK.stocks.length) {
-    return `<div class="signal-note">종목별 확률이 아직 계산되지 않았어요.
-      <a class="banner-link" href="${gasUrl('syncStockRisk')}" target="_blank" rel="noopener">지금 계산하기</a>
-      를 한 번 열면 채워집니다 (30초).</div>`;
-  }
-  const b = SRISK.basis || {};
-  const rows = SRISK.stocks.map((s) => `
+/* 확률은 밴드만 알면 나오므로 서버가 표를 한 번만 보낸다.
+   THR 인덱스: 0=-5% 1=-7% 2=-10% */
+function srStop(s, horizon, thrIdx) {
+  const t = (SRISK.stopTable || [])[s.bandIdx];
+  return t ? t[horizon][thrIdx] : 0;
+}
+function srLoss(s, horizon, thrIdx) {
+  const t = (SRISK.lossTable || [])[s.bandIdx];
+  return t ? t[horizon][thrIdx] : 0;
+}
+
+/* 400종목을 한 화면에 쏟으면 못 읽는다. 찾기·거르기·정렬을 붙이고
+   기본은 위험한 순으로 60종목만 보여준다. */
+const srFilter = { q: '', market: 'all', industry: 'all', band: 'all', sort: 'vol', limit: 60 };
+
+function srMatches() {
+  const q = srFilter.q.trim().toLowerCase();
+  let list = (SRISK.stocks || []).filter((s) => {
+    if (srFilter.market !== 'all' && s.market !== srFilter.market) return false;
+    if (srFilter.industry !== 'all' && (s.industry || '—') !== srFilter.industry) return false;
+    if (srFilter.band !== 'all' && String(s.bandIdx) !== srFilter.band) return false;
+    if (q && s.name.toLowerCase().indexOf(q) < 0 && s.code.indexOf(q) < 0) return false;
+    return true;
+  });
+  const by = {
+    vol: (a, b) => b.vol60 - a.vol60,
+    volAsc: (a, b) => a.vol60 - b.vol60,
+    cap: (a, b) => (a.market === b.market ? a.rank - b.rank : a.market < b.market ? -1 : 1),
+    dd: (a, b) => b.dd60 - a.dd60,
+    heat: (a, b) => (b.vol20 - b.vol60) - (a.vol20 - a.vol60),
+  };
+  return list.sort(by[srFilter.sort] || by.vol);
+}
+
+function srBodyHtml() {
+  const list = srMatches();
+  if (!list.length) return `<div class="empty-state">조건에 맞는 종목이 없어요.</div>`;
+  const shown = list.slice(0, srFilter.limit);
+  const rows = shown.map((s) => {
+    // 20일이 60일보다 크게 높으면 지금 막 흔들리기 시작한 것이다
+    const heat = s.vol20 - s.vol60;
+    return `
     <tr>
-      <td><b>${s.name}</b><div class="exp-sub">${s.market}</div></td>
-      <td class="num">${s.vol60}%</td>
+      <td><b>${s.name}</b><div class="exp-sub">${s.market} ${s.rank}위${s.industry ? ' · ' + s.industry : ''}</div></td>
+      <td class="num">${s.vol60}%<div class="exp-sub">20일 ${s.vol20}%${heat >= 10 ? ' ↑' : heat <= -10 ? ' ↓' : ''}</div></td>
       <td><span class="band-chip ${SR_BAND_CLASS[s.bandIdx] || 'band-mid'}">${s.band}</span></td>
-      ${probCell(s.stop['10'][1])}
-      ${probCell(s.stop['10'][2])}
-      ${probCell(s.stop['20'][1])}
-      <td class="num sr-sep">${s.loss['10'][0]}%</td>
-      <td class="num">${s.loss['20'][0]}%</td>
-    </tr>`).join('');
+      ${probCell(srStop(s, 10, 1))}
+      ${probCell(srStop(s, 10, 2))}
+      ${probCell(srStop(s, 20, 1))}
+      <td class="num sr-sep">${srLoss(s, 10, 1)}%</td>
+      <td class="num">${srLoss(s, 20, 1)}%</td>
+    </tr>`;
+  }).join('');
+  const more = list.length > shown.length
+    ? `<div class="sr-more"><button class="btn btn-ghost btn-sm" id="srMoreBtn">${list.length - shown.length}종목 더 보기</button></div>`
+    : '';
   return `
-    <div class="section-title">종목별 하락 확률 · ${SRISK.asOf} 기준</div>
-    <div class="card exp-verdict">
-      <div class="exp-why" style="margin-top:0;padding-top:0;border-top:none">
-        <b>손절 확률</b>은 매수가 대비 그만큼 하락을 <b>한 번이라도 터치</b>할 확률입니다.
-        고정 손절을 걸었을 때 털릴 확률로 보시면 됩니다.<br>
-        <b>손실 확률</b>은 기간 끝에 실제로 그만큼 <b>손실로 남아 있을</b> 확률입니다.
-        중간에 밀렸다가 회복하면 여기엔 안 잡힙니다.<br>
-        방향 예측이 아닙니다. 크게 빠질 확률이 높다는 건 크게 오를 확률도 높다는 뜻입니다.
-      </div>
-    </div>
+    <div class="sr-count">${list.length}종목 중 ${shown.length}종목 표시</div>
     <div class="table-wrap">
       <table class="exp-table sr-table">
         <thead>
@@ -526,13 +554,91 @@ function stockRiskHtml() {
         <tbody>${rows}</tbody>
       </table>
     </div>
+    ${more}`;
+}
+
+function stockRiskHtml() {
+  if (sriskState === 'loading') return `<div class="empty-state">종목별 확률 불러오는 중…</div>`;
+  if (!SRISK || !SRISK.stocks || !SRISK.stocks.length) {
+    return `<div class="signal-note">종목별 확률이 아직 계산되지 않았어요.
+      <a class="banner-link" href="${gasUrl('syncStockRisk')}" target="_blank" rel="noopener">지금 계산하기</a>
+      를 한 번 열면 채워집니다. 처음 한 번은 종가를 모으느라 몇 분 걸리고,
+      다 안 끝나면 스스로 이어서 마저 채웁니다.</div>`;
+  }
+  const b = SRISK.basis || {};
+  const inds = {};
+  SRISK.stocks.forEach((s) => { inds[s.industry || '—'] = (inds[s.industry || '—'] || 0) + 1; });
+  const indOpts = Object.keys(inds).sort((x, y) => inds[y] - inds[x])
+    .map((k) => `<option value="${k}"${srFilter.industry === k ? ' selected' : ''}>${k} (${inds[k]})</option>`).join('');
+  const bandOpts = (SRISK.bands || []).map((nm, i) =>
+    `<option value="${i}"${srFilter.band === String(i) ? ' selected' : ''}>${nm}</option>`).join('');
+
+  return `
+    <div class="section-title">종목별 하락 확률 · ${SRISK.asOf} 기준 (${SRISK.stocks.length}종목)</div>
+    <div class="card exp-verdict">
+      <div class="exp-why" style="margin-top:0;padding-top:0;border-top:none">
+        <b>손절 확률</b>은 매수가 대비 그만큼 하락을 <b>한 번이라도 터치</b>할 확률입니다.
+        고정 손절을 걸었을 때 털릴 확률로 보시면 됩니다.<br>
+        <b>손실 확률</b>은 기간 끝에 실제로 그만큼 <b>손실로 남아 있을</b> 확률입니다.
+        중간에 밀렸다가 회복하면 여기엔 안 잡힙니다.<br>
+        방향 예측이 아닙니다. 크게 빠질 확률이 높다는 건 크게 오를 확률도 높다는 뜻입니다.
+      </div>
+    </div>
+    <div class="sr-filters">
+      <input type="search" class="search-input" id="srQ" placeholder="종목명 · 코드 검색" value="${srFilter.q}">
+      <select class="form-control" id="srMarket">
+        <option value="all"${srFilter.market === 'all' ? ' selected' : ''}>전체 시장</option>
+        <option value="KOSPI"${srFilter.market === 'KOSPI' ? ' selected' : ''}>코스피</option>
+        <option value="KOSDAQ"${srFilter.market === 'KOSDAQ' ? ' selected' : ''}>코스닥</option>
+      </select>
+      <select class="form-control" id="srInd">
+        <option value="all"${srFilter.industry === 'all' ? ' selected' : ''}>전체 업종</option>${indOpts}
+      </select>
+      <select class="form-control" id="srBand">
+        <option value="all"${srFilter.band === 'all' ? ' selected' : ''}>전체 구간</option>${bandOpts}
+      </select>
+      <select class="form-control" id="srSort">
+        <option value="vol"${srFilter.sort === 'vol' ? ' selected' : ''}>변동성 높은 순</option>
+        <option value="volAsc"${srFilter.sort === 'volAsc' ? ' selected' : ''}>변동성 낮은 순</option>
+        <option value="cap"${srFilter.sort === 'cap' ? ' selected' : ''}>시가총액 순</option>
+        <option value="dd"${srFilter.sort === 'dd' ? ' selected' : ''}>최근 60일 낙폭 순</option>
+        <option value="heat"${srFilter.sort === 'heat' ? ' selected' : ''}>최근 급등락 순</option>
+      </select>
+    </div>
+    <div id="srBody">${srBodyHtml()}</div>
     <div class="signal-note">
       60일 실현변동성 8구간별 실측치입니다.
       학습 ${b.train || ''} → 검증 ${b.test || ''}. ${b.error || ''}<br>
       ${b.note || ''}<br>
       같은 구간이면 확률이 같습니다. 구간 안에서의 순서는 변동성 숫자로 보세요.
-      구간은 평균 31거래일에 한 번 바뀌므로 하루 한 번만 갱신합니다.
+      구간은 평균 31거래일에 한 번 바뀌므로 하루 한 번만 갱신합니다.<br>
+      대상은 코스피·코스닥 시가총액 상위 각 200종목입니다 (ETF·우선주 제외).
     </div>`;
+}
+
+/* 목록만 다시 그린다 — 검색창을 통째로 새로 만들면 입력 중 포커스가 날아간다 */
+function srRefresh() {
+  const body = document.getElementById('srBody');
+  if (!body) return;
+  body.innerHTML = srBodyHtml();
+  bindSrBody();
+}
+
+function bindSrBody() {
+  const more = document.getElementById('srMoreBtn');
+  if (more) more.addEventListener('click', () => { srFilter.limit += 100; srRefresh(); });
+}
+
+function bindStockRisk() {
+  const q = document.getElementById('srQ');
+  if (!q) return;
+  q.addEventListener('input', () => { srFilter.q = q.value; srFilter.limit = 60; srRefresh(); });
+  [['srMarket', 'market'], ['srInd', 'industry'], ['srBand', 'band'], ['srSort', 'sort']]
+    .forEach(([id, key]) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', () => { srFilter[key] = el.value; srFilter.limit = 60; srRefresh(); });
+    });
+  bindSrBody();
 }
 
 let RISK = null;
@@ -649,6 +755,7 @@ function renderRiskPage(el) {
       그럴 땐 밴드보다 <b>섹터 간 순서와 변동성 숫자</b>를 보세요.
     </div>
   `;
+  bindStockRisk();
 }
 
 /* ============================================================

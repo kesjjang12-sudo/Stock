@@ -169,6 +169,7 @@ function doGet(e) {
     if (action === 'risk') return jsonOut_(sectorRisk_(params.market));
     if (action === 'stockrisk') return jsonOut_(stockRisk_());
     if (action === 'syncStockRisk') return jsonOut_(syncStockRisk());
+    if (action === 'syncUniverse') return jsonOut_(syncUniverse());
     if (action === 'target') return jsonOut_(calculateTargetScore());
     if (action === 'rows') return jsonOut_(rawSectorDaily_(params.sector, params.from, params.to));
     if (action === 'backfill') {
@@ -303,7 +304,8 @@ function systemStatus_() {
 }
 
 function setupTrigger() {
-  const managed = ['refreshAll', 'backfillOutcomes', 'syncUsDaily', 'syncEtfHoldings'];
+  const managed = ['refreshAll', 'backfillOutcomes', 'syncUsDaily', 'syncEtfHoldings',
+    'syncUniverse', 'syncStockRisk'];
   ScriptApp.getProjectTriggers().forEach((t) => {
     if (managed.indexOf(t.getHandlerFunction()) > -1) ScriptApp.deleteTrigger(t);
   });
@@ -311,6 +313,7 @@ function setupTrigger() {
   ScriptApp.newTrigger('backfillOutcomes').timeBased().everyDays(1).atHour(8).create();
   ScriptApp.newTrigger('syncUsDaily').timeBased().everyDays(1).atHour(8).create();
   ScriptApp.newTrigger('syncEtfHoldings').timeBased().everyDays(1).atHour(7).create();
+  ScriptApp.newTrigger('syncUniverse').timeBased().everyDays(1).atHour(7).create();
   ScriptApp.newTrigger('syncStockRisk').timeBased().everyDays(1).atHour(8).create();
   syncEtfHoldings();
   refreshAll();
@@ -2085,10 +2088,23 @@ function calculateTargetScore(asOfIndex) {
    종목이 하나도 겹치지 않는 코스피·코스닥 201~400위 312종목 43,680표본에서
    검증했다. 칸별 오차 평균 1.3~4.0%p. 실측이 예측보다 0~5%p 높게 나왔으므로
    이 표는 보수적인 쪽이다. */
-const STOCK_RISK_HEADERS = ['date', 'code', 'name', 'sectorId', 'market', 'vol20', 'vol60',
-  'band', 'bandIdx', 'dd60',
-  's5_5', 's7_5', 's10_5', 's5_10', 's7_10', 's10_10', 's5_20', 's7_20', 's10_20',
-  'l7_10', 'l10_10', 'l7_20', 'l10_20'];
+/* 화면에서 매번 종목 이력을 받으면 몇 분이 걸린다. 하루 한 번만 받아
+   시트에 넣어두고 화면은 읽기만 한다. 변동성 구간은 평균 31거래일에 한 번
+   바뀌므로 하루 1회 갱신으로 충분하다.
+
+   대상은 ETF 구성 62종목이 아니라 코스피·코스닥 시가총액 상위 각 200종목이다.
+   섹터 ETF에 안 들어간 대장주가 빠지던 문제를 없앤다.
+
+   확률표는 코스피·코스닥 1~200위 369종목 43,096표본으로 만들고,
+   종목이 하나도 겹치지 않는 코스피·코스닥 201~400위 312종목 43,680표본에서
+   검증했다. 칸별 오차 평균 2.5%p. 실측이 예측보다 0~4%p 높게 나왔으므로
+   이 표는 보수적인 쪽이다.
+
+   확률은 밴드만 알면 표에서 나오므로 시트에도 응답에도 밴드까지만 담는다
+   (400종목 × 확률 13칸을 매일 쓰면 시트가 금방 불어난다). */
+const STOCK_RISK_HEADERS = ['date', 'code', 'name', 'market', 'rank', 'sectorId', 'industry',
+  'vol20', 'vol60', 'band', 'bandIdx', 'dd60'];
+const STOCK_RISK_KEEP_DAYS = 60;   // 시트에 남길 날짜 수
 
 /* 하락을 어떻게 정의하느냐로 숫자가 세 배 갈린다. 20일 7% 기준 8구간에서
      고점대비   94%   보유 중 아무 고점에서든 7% 밀린 적 있나 → 올라도 걸린다
@@ -2130,8 +2146,230 @@ const DD_BASIS = {
 const SECTOR_RISK_HEADERS = ['date', 'market', 'sectorId', 'name', 'icon', 'rank',
   'vol60', 'vol20', 'band', 'rising', 'dd60', 'flowVol20', 'net20', 'indi20', 'buyDays', 'ret20'];
 
-const STOCK_RISK_PAGES = 7;   // 10거래일 × 7 = 70일이면 vol60에 충분
 
+const STOCK_RISK_PAGES = 7;        // 10거래일 × 7 = 70일이면 vol60에 충분
+const STOCK_RISK_BUDGET_MS = 3.6 * 60 * 1000;   // 뒤에 시트 쓰기·섹터 계산이 남아 6분보다 넉넉히 앞
+
+/* ---------- 유니버스: 시가총액 상위 종목 ---------- */
+
+const UNIVERSE_HEADERS = ['code', 'name', 'market', 'rank', 'marketValue',
+  'industryCode', 'industry', 'sectorId', 'updated'];
+const UNIVERSE_N = 200;            // 시장별 상위 몇 종목까지
+const UNIVERSE_PAGES = 3;          // 100개씩 3장 — ETF·우선주를 걸러도 200개가 남는다
+
+/* 업종 코드는 종목 API가 숫자로만 준다. 이름은 업종 목록 한 장에서 받아 붙인다. */
+function industryNames_() {
+  const out = {};
+  try {
+    const res = UrlFetchApp.fetch('https://finance.naver.com/sise/sise_group.naver?type=upjong',
+      { muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const html = res.getContentText('EUC-KR');
+    const re = /no=(\d+)">([^<]+)</g;
+    let m;
+    while ((m = re.exec(html))) out[m[1]] = m[2].trim();
+  } catch (e) { /* 업종명이 없어도 나머지는 돌아간다 */ }
+  return out;
+}
+
+function syncUniverse() {
+  const ss = getDb_();
+  const sheet = resetSheetIfSchemaChanged_(ss, 'StockUniverse', UNIVERSE_HEADERS);
+
+  /* 업종은 상장 후 거의 안 바뀐다. 이미 아는 종목은 다시 묻지 않는다
+     (안 그러면 매일 400번을 더 왕복한다). */
+  const known = {};
+  sheet.getDataRange().getValues().slice(1).forEach((r) => {
+    const c = padKrCode_(r[0]);
+    if (c && r[6]) known[c] = { industryCode: String(r[5] || ''), industry: String(r[6]) };
+  });
+
+  const markets = ['KOSPI', 'KOSDAQ'];
+  const reqs = [];
+  const tag = [];
+  markets.forEach((mk) => {
+    for (let p = 1; p <= UNIVERSE_PAGES; p++) {
+      reqs.push({
+        url: 'https://m.stock.naver.com/api/stocks/marketValue/' + mk + '?page=' + p + '&pageSize=100',
+        muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+      tag.push(mk);
+    }
+  });
+
+  const pool = { KOSPI: [], KOSDAQ: [] };
+  fetchAllChunked_(reqs).forEach((res, i) => {
+    if (!res) return;
+    let d;
+    try { d = JSON.parse(res.getContentText()); } catch (e) { return; }
+    (d.stocks || []).forEach((s) => {
+      if (s.stockEndType !== 'stock') return;          // ETF·ETN 제외
+      const code = padKrCode_(s.itemCode);
+      if (!/0$/.test(code)) return;                    // 우선주 제외 (005935 같은 것)
+      pool[tag[i]].push({ code: code, name: String(s.stockName || ''), market: tag[i],
+        marketValue: numOf_(s.marketValue) });
+    });
+  });
+
+  const uni = [];
+  markets.forEach((mk) => {
+    const seen = {};
+    let rank = 0;
+    pool[mk].forEach((x) => {
+      if (seen[x.code] || rank >= UNIVERSE_N) return;
+      seen[x.code] = true;
+      x.rank = ++rank;
+      uni.push(x);
+    });
+  });
+  if (!uni.length) return { error: '시가총액 순위를 받지 못했습니다.' };
+
+  const need = uni.filter((u) => !known[u.code]).map((u) => u.code);
+  if (need.length) {
+    const names = industryNames_();
+    const ireqs = need.map((c) => ({
+      url: 'https://m.stock.naver.com/api/stock/' + c + '/integration',
+      muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' },
+    }));
+    fetchAllChunked_(ireqs).forEach((res, i) => {
+      if (!res) return;
+      let d;
+      try { d = JSON.parse(res.getContentText()); } catch (e) { return; }
+      const ic = String(d.industryCode || '');
+      known[need[i]] = { industryCode: ic, industry: names[ic] || '' };
+    });
+  }
+
+  /* 기존 8개 섹터에 속한 종목은 라벨을 유지한다 — 화면 필터에서 계속 쓴다 */
+  const active = activeKrStocks_(ss);
+  const sectorOf = {};
+  SECTOR_CONFIG.forEach((sec) => {
+    (active[sec.id] || []).forEach((s) => { if (!sectorOf[s.code]) sectorOf[s.code] = sec.id; });
+  });
+
+  const today = todayStr_();
+  const mkMap = {};
+  const rows = uni.map((u) => {
+    mkMap[u.code] = u.market;
+    const k = known[u.code] || {};
+    return ["'" + u.code, u.name, u.market, u.rank, u.marketValue,
+      k.industryCode || '', k.industry || '', sectorOf[u.code] || '', today];
+  });
+  writeRows_(sheet, rows);
+  saveMarketMap_(ss, mkMap);
+  return { ok: true, count: rows.length, newIndustry: need.length };
+}
+
+function loadUniverse_(ss) {
+  const sheet = resetSheetIfSchemaChanged_(ss, 'StockUniverse', UNIVERSE_HEADERS);
+  const out = [];
+  sheet.getDataRange().getValues().slice(1).forEach((r) => {
+    const c = padKrCode_(r[0]);
+    if (!c) return;
+    out.push({ code: c, name: String(r[1] || ''), market: String(r[2] || 'KOSPI'),
+      rank: Number(r[3]) || 0, industry: String(r[6] || ''), sectorId: String(r[7] || '') });
+  });
+  return out;
+}
+
+/* ---------- 종가 보관: 매일 10일치만 받아 이어붙인다 ---------- */
+
+/* 400종목 × 7페이지를 매일 받으면 2,800번 왕복이라 6분 한도에 걸린다.
+   지난 종가는 변하지 않으므로 한 번 받아 보관하고, 이후로는 최근 한 장(10일)만
+   받아 앞에 붙인다. 하루 400번으로 줄어든다. */
+const CLOSES_HEADERS = ['code', 'name', 'market', 'updated', 'closes'];
+const CLOSES_KEEP = 90;
+const CLOSES_MIN = 61;             // vol60에 필요한 최소 종가 수
+const COLD_SLICE = 50;             // 한 번에 처음부터 채울 종목 수
+
+function parseCloses_(s) {
+  const out = [];
+  String(s || '').split(',').forEach((p) => {
+    const i = p.indexOf(':');
+    if (i < 0) return;
+    const d = p.slice(0, i);
+    const v = Number(p.slice(i + 1));
+    if (d.length === 8 && v > 0) out.push({ d: d, c: v });
+  });
+  return out;
+}
+
+function encodeCloses_(arr) {
+  return arr.slice(0, CLOSES_KEEP).map((x) => x.d + ':' + x.c).join(',');
+}
+
+function mergeCloses_(stored, hist) {
+  const map = {};
+  (stored || []).forEach((x) => { map[x.d] = x.c; });
+  (hist || []).forEach((r) => {
+    if (r && r.date && r.closePrice) map[String(r.date).replace(/-/g, '')] = r.closePrice;
+  });
+  return Object.keys(map).sort().reverse().map((d) => ({ d: d, c: map[d] })).slice(0, CLOSES_KEEP);
+}
+
+function refreshCloses_(ss, uni, deadline) {
+  const sheet = resetSheetIfSchemaChanged_(ss, 'StockCloses', CLOSES_HEADERS);
+  const store = {};
+  sheet.getDataRange().getValues().slice(1).forEach((r) => {
+    const c = padKrCode_(r[0]);
+    if (c) store[c] = { updated: asDateStr_(r[3]), arr: parseCloses_(r[4]) };
+  });
+
+  const today = todayStr_();
+  const warm = [];
+  const cold = [];
+  uni.forEach((u) => {
+    const s = store[u.code];
+    if (!s || s.arr.length < CLOSES_MIN) cold.push(u.code);
+    else if (s.updated !== today) warm.push(u.code);
+  });
+
+  const apply = (code, hist) => {
+    const prev = store[code] ? store[code].arr : [];
+    const merged = mergeCloses_(prev, hist);
+    if (merged.length) store[code] = { updated: today, arr: merged };
+  };
+
+  let fetched = 0;
+  if (warm.length) {
+    const h = fetchTrendDeepMulti_(warm, 1);
+    warm.forEach((c) => apply(c, h[c]));
+    fetched += warm.length;
+  }
+
+  /* 남은 시간을 고정값으로 재면 느린 날 한 덩이가 한도를 넘겨 실행이 통째로 죽는다.
+     실제로 걸린 가장 긴 덩이를 기준으로 삼는다 (백필과 같은 방식). */
+  let pending = 0;
+  let slowest = 60000;
+  for (let i = 0; i < cold.length; i += COLD_SLICE) {
+    if (Date.now() + slowest * 1.3 > deadline) { pending = cold.length - i; break; }
+    const t0 = Date.now();
+    const part = cold.slice(i, i + COLD_SLICE);
+    const h = fetchTrendDeepMulti_(part, STOCK_RISK_PAGES);
+    part.forEach((c) => apply(c, h[c]));
+    fetched += part.length;
+    slowest = Math.max(slowest, Date.now() - t0);
+  }
+
+  /* 유니버스에서 빠진 종목은 들고 있어봐야 시트만 불린다 */
+  const rows = [];
+  uni.forEach((u) => {
+    const s = store[u.code];
+    if (s) rows.push(["'" + u.code, u.name, u.market, s.updated, encodeCloses_(s.arr)]);
+  });
+  writeRows_(sheet, rows);
+  return { store: store, pending: pending, fetched: fetched };
+}
+
+/* 최신일 우선 종가 배열에서 일간 등락률을 뽑는다 */
+function closeReturns_(arr) {
+  const out = [];
+  for (let j = 0; j < arr.length - 1; j++) {
+    const cur = arr[j].c;
+    const prev = arr[j + 1].c;
+    if (cur && prev) out.push((cur / prev - 1) * 100);
+  }
+  return out;
+}
 
 function volBandIndex_(vol60) {
   for (let k = 0; k < VOL_CUTS.length; k++) {
@@ -2140,38 +2378,23 @@ function volBandIndex_(vol60) {
   return VOL_BANDS.length - 1;
 }
 
-/* 최신일 우선 이력에서 일간 등락률을 뽑는다 (winFrom_과 같은 방향 규칙) */
-function dailyReturns_(hist) {
-  const out = [];
-  for (let j = 0; j < hist.length - 1; j++) {
-    const cur = hist[j].closePrice;
-    const prev = hist[j + 1].closePrice;
-    if (cur && prev) out.push((cur / prev - 1) * 100);
-  }
-  return out;
-}
-
 function syncStockRisk() {
+  const started = Date.now();
   const ss = getDb_();
-  const active = activeKrStocks_(ss);
-  const marketOf = loadMarketMap_(ss);
 
-  const codes = [];
-  const owner = {};
-  SECTOR_CONFIG.forEach((sec) => {
-    (active[sec.id] || []).forEach((s) => {
-      if (owner[s.code] === undefined) { codes.push(s.code); owner[s.code] = { sectorId: sec.id, name: s.name }; }
-    });
-  });
-  if (!codes.length) return { error: 'ETF 구성종목이 없습니다. syncEtf를 먼저 실행하세요.' };
+  let uni = loadUniverse_(ss);
+  const staleUniverse = !uni.length || uni.length < UNIVERSE_N;
+  if (staleUniverse) { syncUniverse(); uni = loadUniverse_(ss); }
+  if (!uni.length) return { error: '유니버스를 만들지 못했습니다. action=syncUniverse 를 먼저 열어주세요.' };
 
-  const hists = fetchTrendDeepMulti_(codes, STOCK_RISK_PAGES);
+  const cl = refreshCloses_(ss, uni, started + STOCK_RISK_BUDGET_MS);
+
   const today = todayStr_();
   const rows = [];
-  codes.forEach((code) => {
-    const h = hists[code] || [];
-    if (h.length < 45) return;
-    const rets = dailyReturns_(h);
+  uni.forEach((u) => {
+    const s = cl.store[u.code];
+    if (!s || s.arr.length < CLOSES_MIN) return;
+    const rets = closeReturns_(s.arr);
     const sd60 = stdev_(rets.slice(0, 60));
     const sd20 = stdev_(rets.slice(0, 20));
     if (sd60 == null) return;
@@ -2180,25 +2403,26 @@ function syncStockRisk() {
     const b = volBandIndex_(vol60);
     // 낙폭은 과거→최근 순으로 곱해야 하므로 뒤집는다
     const dd60 = +maxDrawdown_(rets.slice(0, 60).reverse()).toFixed(1);
-    const sp = DD_STOP[b];
-    const ls = DD_LOSS[b];
-    rows.push([today, "'" + code, owner[code].name, owner[code].sectorId, marketOf[code] || 'KOSPI',
-      vol20, vol60, VOL_BANDS[b], b, dd60,
-      sp[5][0], sp[5][1], sp[5][2], sp[10][0], sp[10][1], sp[10][2], sp[20][0], sp[20][1], sp[20][2],
-      ls[10][1], ls[10][2], ls[20][1], ls[20][2]]);
+    rows.push([today, "'" + u.code, u.name, u.market, u.rank, u.sectorId, u.industry,
+      vol20, vol60, VOL_BANDS[b], b, dd60]);
   });
 
-  if (!rows.length) return { error: '계산된 종목이 없습니다.' };
+  if (!rows.length) {
+    return { ok: false, pending: cl.pending, fetched: cl.fetched,
+      note: '아직 종가가 덜 모였습니다. 잠시 뒤 다시 실행하면 이어서 채웁니다.' };
+  }
 
-  /* 같은 날 다시 돌면 그날 행을 갈아끼운다 (하루 한 행 유지) */
-  const sheet = getOrCreateSheet_(ss, 'StockRisk', STOCK_RISK_HEADERS);
+  /* 같은 날 다시 돌면 그날 행을 갈아끼운다. 400종목이라 오래된 날짜는 잘라낸다. */
+  const sheet = resetSheetIfSchemaChanged_(ss, 'StockRisk', STOCK_RISK_HEADERS);
   const W = STOCK_RISK_HEADERS.length;
   const old = sheet.getDataRange().getValues().slice(1)
-    .filter((r) => asDateStr_(r[0]) !== today);
-  const all = old.concat(rows);
+    .filter((r) => r[0] && asDateStr_(r[0]) !== today);
+  const keepFrom = recentDateFloor_(old.map((r) => asDateStr_(r[0])), STOCK_RISK_KEEP_DAYS - 1);
+  const all = old.filter((r) => asDateStr_(r[0]) >= keepFrom).concat(rows);
   sheet.clear();
   sheet.getRange(1, 1, 1, W).setValues([STOCK_RISK_HEADERS]);
   sheet.getRange(2, 1, all.length, W).setValues(all);
+
   // 섹터 위험도도 같은 시점에 계산해 저장한다 (화면이 매번 7,600행을 접지 않도록)
   let secCount = 0;
   try {
@@ -2224,25 +2448,57 @@ function syncStockRisk() {
   } catch (e) { /* 섹터 저장 실패해도 종목 확률은 살린다 */ }
 
   try { CacheService.getScriptCache().put('srver', Utilities.getUuid(), 21600); } catch (e) {}
-  return { ok: true, date: today, count: rows.length, sectorRows: secCount };
+
+  /* 처음 채우는 날은 한 번에 다 못 받는다. 남았으면 스스로 다시 깨운다. */
+  if (cl.pending > 0 && cl.fetched > 0) scheduleStockRiskResume_();
+
+  return { ok: true, date: today, count: rows.length, universe: uni.length,
+    pending: cl.pending, fetched: cl.fetched, sectorRows: secCount };
 }
 
-/* 화면용 — 시트에서 가장 최근 날짜만 읽어 즉시 돌려준다 (네트워크 요청 없음) */
+function scheduleStockRiskResume_() {
+  try {
+    ScriptApp.getProjectTriggers().forEach((t) => {
+      if (t.getHandlerFunction() === 'syncStockRiskResume') ScriptApp.deleteTrigger(t);
+    });
+    ScriptApp.newTrigger('syncStockRiskResume').timeBased().after(90 * 1000).create();
+  } catch (e) { /* 트리거 한도에 걸리면 다음 날 정기 실행이 이어받는다 */ }
+}
+
+function syncStockRiskResume() {
+  ScriptApp.getProjectTriggers().forEach((t) => {
+    if (t.getHandlerFunction() === 'syncStockRiskResume') ScriptApp.deleteTrigger(t);
+  });
+  syncStockRisk();
+}
+
+/* 날짜 목록에서 최근 n번째 날짜를 찾는다 (그 이전 행은 버린다) */
+function recentDateFloor_(dates, n) {
+  const uniq = {};
+  dates.forEach((d) => { if (d) uniq[d] = 1; });
+  const sorted = Object.keys(uniq).sort().reverse();
+  return sorted.length > n ? sorted[n] : '0000-00-00';
+}
+
+/* 화면용 — 시트에서 가장 최근 날짜만 읽어 즉시 돌려준다 (네트워크 요청 없음).
+   확률은 밴드에서 나오므로 표를 한 번만 보내고 종목엔 밴드만 담는다. */
 function stockRisk_() {
   const cache = CacheService.getScriptCache();
   let ver = '';
   try { ver = cache.get('srver') || ''; } catch (e) {}
-  const ck = 'sr|' + ver;
+  const ck = 'sr2|' + ver;
   try {
     const hit = cache.get(ck);
     if (hit) return JSON.parse(hit);
   } catch (e) {}
 
-  const rows = getOrCreateSheet_(getDb_(), 'StockRisk', STOCK_RISK_HEADERS).getDataRange().getValues().slice(1);
+  const rows = resetSheetIfSchemaChanged_(getDb_(), 'StockRisk', STOCK_RISK_HEADERS)
+    .getDataRange().getValues().slice(1);
   let latest = '';
   rows.forEach((r) => { const d = asDateStr_(r[0]); if (d > latest) latest = d; });
   if (!latest) {
     return { asOf: '', stocks: [], bands: VOL_BANDS, cuts: VOL_CUTS, basis: DD_BASIS,
+      stopTable: DD_STOP, lossTable: DD_LOSS,
       note: '아직 계산된 적이 없습니다. action=syncStockRisk 를 한 번 열어주세요.' };
   }
 
@@ -2250,22 +2506,20 @@ function stockRisk_() {
   rows.forEach((r) => {
     if (asDateStr_(r[0]) !== latest) return;
     out.push({
-      code: padKrCode_(r[1]), name: String(r[2]), sectorId: String(r[3]), market: String(r[4]),
-      vol20: Number(r[5]), vol60: Number(r[6]), band: String(r[7]),
-      bandIdx: Number(r[8]), dd60: Number(r[9]),
-      stop: { 5: [Number(r[10]), Number(r[11]), Number(r[12])],
-              10: [Number(r[13]), Number(r[14]), Number(r[15])],
-              20: [Number(r[16]), Number(r[17]), Number(r[18])] },
-      loss: { 10: [Number(r[19]), Number(r[20])], 20: [Number(r[21]), Number(r[22])] },
+      code: padKrCode_(r[1]), name: String(r[2]), market: String(r[3]), rank: Number(r[4]) || 0,
+      sectorId: String(r[5] || ''), industry: String(r[6] || ''),
+      vol20: Number(r[7]), vol60: Number(r[8]), band: String(r[9]),
+      bandIdx: Number(r[10]), dd60: Number(r[11]),
     });
   });
   out.sort((a, b) => b.vol60 - a.vol60);
   const res = { asOf: latest, stocks: out, bands: VOL_BANDS, cuts: VOL_CUTS,
     thresholds: [5, 7, 10], horizons: [5, 10, 20], basis: DD_BASIS,
+    stopTable: DD_STOP, lossTable: DD_LOSS,
     defs: { stop: '매수가 대비 그만큼 하락을 한 번이라도 터치할 확률 (고정 손절에 걸릴 확률)',
             loss: '기간 끝 종가가 매수가보다 그만큼 낮을 확률 (실제 손실)' },
     caveat: '방향이 아니라 흔들림의 크기입니다. 크게 빠질 확률이 높다는 건 크게 오를 확률도 높다는 뜻입니다.' };
-  try { cache.put(ck, JSON.stringify(res), 6 * 3600); } catch (e) {}
+  try { cache.put(ck, JSON.stringify(res), 6 * 3600); } catch (e) { /* 100KB를 넘으면 캐시를 건너뛴다 */ }
   return res;
 }
 
@@ -2774,6 +3028,20 @@ function getOrCreateSheet_(ss, name, headers) {
   }
   // 컬럼이 추가된 버전으로 업그레이드된 경우 헤더를 맞춰준다
   if (sheet.getLastColumn() < headers.length) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+  return sheet;
+}
+
+/* 컬럼 구성이 바뀐 시트는 옛 행을 그대로 두면 값이 한 칸씩 밀려 읽힌다.
+   매일 다시 계산해 채우는 시트에 한해, 헤더가 다르면 비우고 새로 시작한다. */
+function resetSheetIfSchemaChanged_(ss, name, headers) {
+  const sheet = ss.getSheetByName(name);
+  if (!sheet) return getOrCreateSheet_(ss, name, headers);
+  const width = Math.max(1, sheet.getLastColumn());
+  const cur = sheet.getRange(1, 1, 1, width).getValues()[0].map((x) => String(x));
+  if (cur.join('|') !== headers.join('|')) {
+    sheet.clear();
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   }
   return sheet;

@@ -471,12 +471,12 @@ async function fetchStockRisk() {
   }
 }
 
-const SR_BAND_CLASS = { '매우높음': 'band-high', '높음': 'band-high', '보통': 'band-mid',
-                        '낮음': 'band-low', '매우낮음': 'band-low' };
+const SR_BAND_CLASS = ['band-low', 'band-low', 'band-low', 'band-mid',
+                       'band-mid', 'band-high', 'band-high', 'band-high'];
 
 /* 확률이 높을수록 진하게. 색만으로 판단하지 않도록 숫자를 항상 같이 둔다. */
 function probCell(p) {
-  const cls = p >= 70 ? 'pc-hi' : p >= 40 ? 'pc-mid' : 'pc-lo';
+  const cls = p >= 50 ? 'pc-hi' : p >= 25 ? 'pc-mid' : 'pc-lo';
   return `<td class="num ${cls}">${p}%</td>`;
 }
 
@@ -492,42 +492,46 @@ function stockRiskHtml() {
     <tr>
       <td><b>${s.name}</b><div class="exp-sub">${s.market}</div></td>
       <td class="num">${s.vol60}%</td>
-      <td><span class="band-chip ${SR_BAND_CLASS[s.band] || ''}">${s.band}</span></td>
-      ${probCell(s.p['10'][1])}
-      ${probCell(s.p['10'][2])}
-      ${probCell(s.p['20'][1])}
-      ${probCell(s.p['20'][2])}
-      <td class="num">${s.dd60}%</td>
+      <td><span class="band-chip ${SR_BAND_CLASS[s.bandIdx] || 'band-mid'}">${s.band}</span></td>
+      ${probCell(s.stop['10'][1])}
+      ${probCell(s.stop['10'][2])}
+      ${probCell(s.stop['20'][1])}
+      <td class="num sr-sep">${s.loss['10'][0]}%</td>
+      <td class="num">${s.loss['20'][0]}%</td>
     </tr>`).join('');
   return `
     <div class="section-title">종목별 하락 확률 · ${SRISK.asOf} 기준</div>
     <div class="card exp-verdict">
       <div class="exp-why" style="margin-top:0;padding-top:0;border-top:none">
-        <b>읽는 법</b> — "10일 7%"는 <b>앞으로 10거래일 안에 고점 대비 7% 넘게 빠질 확률</b>입니다.
-        오늘 사서 열흘 안에 겪을 수 있는 하락폭으로 보시면 됩니다.<br>
+        <b>손절 확률</b>은 매수가 대비 그만큼 하락을 <b>한 번이라도 터치</b>할 확률입니다.
+        고정 손절을 걸었을 때 털릴 확률로 보시면 됩니다.<br>
+        <b>손실 확률</b>은 기간 끝에 실제로 그만큼 <b>손실로 남아 있을</b> 확률입니다.
+        중간에 밀렸다가 회복하면 여기엔 안 잡힙니다.<br>
         방향 예측이 아닙니다. 크게 빠질 확률이 높다는 건 크게 오를 확률도 높다는 뜻입니다.
-        <b>비중과 손절선을 정하는 데 쓰세요.</b>
       </div>
     </div>
     <div class="table-wrap">
       <table class="exp-table sr-table">
         <thead>
           <tr>
-            <th>종목</th><th class="num">변동성</th><th>구간</th>
-            <th class="num">10일<br>7%</th><th class="num">10일<br>10%</th>
-            <th class="num">20일<br>7%</th><th class="num">20일<br>10%</th>
-            <th class="num">최근<br>낙폭</th>
+            <th rowspan="2">종목</th><th class="num" rowspan="2">변동성</th><th rowspan="2">구간</th>
+            <th class="num" colspan="3">손절 확률 (매수가 대비)</th>
+            <th class="num sr-sep" colspan="2">손실 확률 (기간말)</th>
+          </tr>
+          <tr>
+            <th class="num">10일<br>−7%</th><th class="num">10일<br>−10%</th><th class="num">20일<br>−7%</th>
+            <th class="num sr-sep">10일<br>−7%</th><th class="num">20일<br>−7%</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
     <div class="signal-note">
-      확률은 60일 실현변동성 5구간별로 실측한 값입니다.
-      학습 ${b.train || ''} → 검증 ${b.test || ''}.
-      ${b.error || ''}<br>
+      60일 실현변동성 8구간별 실측치입니다.
+      학습 ${b.train || ''} → 검증 ${b.test || ''}. ${b.error || ''}<br>
+      ${b.note || ''}<br>
       같은 구간이면 확률이 같습니다. 구간 안에서의 순서는 변동성 숫자로 보세요.
-      변동성 구간은 평균 31거래일에 한 번 바뀌므로 하루 한 번만 갱신합니다.
+      구간은 평균 31거래일에 한 번 바뀌므로 하루 한 번만 갱신합니다.
     </div>`;
 }
 

@@ -322,6 +322,13 @@ const SECTOR_HEADERS = [
 ];
 
 function refreshAll() {
+  // 백필과 겹치면 서로 읽은 시점의 시트를 각자 통째로 되돌려써서 갱신이 사라진다
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return;
+  try { refreshAllInner_(); } finally { lock.releaseLock(); }
+}
+
+function refreshAllInner_() {
   const ss = getDb_();
   // 구성종목 스냅샷이 없으면 먼저 만든다 (최초 실행/신규 섹터 추가 시)
   if (!hasEtfHoldings_(ss)) syncEtfHoldings();
@@ -1090,6 +1097,16 @@ function sortSectorDaily_(sheet) {
   sheet.getRange(2, 1, last - 1, SECTOR_DAILY_HEADERS.length).sort([{ column: 1, ascending: true }]);
 }
 
+
+/* 수급 조회가 일부 실패하면 적은 종목으로 계산된 합계가 만들어진다.
+   그대로 덮어쓰면 이미 온전했던 과거 값이 깎인다. 종목 수가 줄면 건너뛴다. */
+function keepsCoverage_(oldRow, newRow) {
+  if (!oldRow) return true;
+  const oldN = Number(oldRow[8]) || 0;
+  const newN = Number(newRow[8]) || 0;
+  return newN >= oldN;
+}
+
 function upsertSectorDailyTail_(sheet, byKey) {
   const W = SECTOR_DAILY_HEADERS.length;
   const last = sheet.getLastRow();
@@ -1119,7 +1136,11 @@ function upsertSectorDailyTail_(sheet, byKey) {
       Math.round(b.frgn + b.org), Math.round(b.frgn), Math.round(b.org), Math.round(b.indi),
       mean_(b.pcts), b.pcts.length,
     ];
-    if (idx[keys[i]] !== undefined) { values[idx[keys[i]]] = row; dirty = true; }
+    if (idx[keys[i]] !== undefined) {
+      if (!keepsCoverage_(values[idx[keys[i]]], row)) continue;
+      values[idx[keys[i]]] = row;
+      dirty = true;
+    }
     else if (b.date >= minDate) added.push(row);
     else return upsertSectorDaily_(sheet, byKey); // 꼬리 밖 과거 날짜
   }
@@ -1146,8 +1167,9 @@ function upsertSectorDaily_(sheet, byKey) {
       Math.round(b.frgn + b.org), Math.round(b.frgn), Math.round(b.org), Math.round(b.indi),
       mean_(b.pcts), b.pcts.length,
     ];
-    if (idx[k] !== undefined) values[idx[k]] = row;
-    else added.push(row);
+    if (idx[k] !== undefined) {
+      if (keepsCoverage_(values[idx[k]], row)) values[idx[k]] = row;
+    } else added.push(row);
   });
 
   const all = values.concat(added);
@@ -1253,6 +1275,12 @@ function backfillSector_(sec, krStocks, marketOf) {
 /* 섹터 단위로 끊어서 처리하고 커서를 저장한다. 한 번에 다 못 끝내면
    같은 주소를 다시 열어 이어서 진행하면 된다. */
 function backfillSectorDaily_(maxMs) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(60000)) return { finished: false, done: 0, total: SECTOR_CONFIG.length, log: ['다른 작업이 시트를 쓰고 있어 건너뜁니다. 잠시 후 다시 열어주세요.'] };
+  try { return backfillSectorDailyInner_(maxMs); } finally { lock.releaseLock(); }
+}
+
+function backfillSectorDailyInner_(maxMs) {
   const props = PropertiesService.getScriptProperties();
   const ss = getDb_();
   const sheet = getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS);

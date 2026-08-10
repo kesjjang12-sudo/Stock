@@ -166,7 +166,7 @@ function doGet(e) {
     if (action === 'history') return jsonOut_(getHistory_(params.period, params.market, params.metric, params.investor, params.from, params.to));
     if (action === 'syncEtf') return jsonOut_(syncEtfHoldings());
     if (action === 'profile') return jsonOut_(profileRefresh_());
-    if (action === 'score') return jsonOut_(sectorScores_(params.market));
+    if (action === 'risk') return jsonOut_(sectorRisk_(params.market));
     if (action === 'rows') return jsonOut_(rawSectorDaily_(params.sector, params.from, params.to));
     if (action === 'backfill') {
       const r = backfillSectorDaily_(3.5 * 60 * 1000, params.reset === '1', params.sector);
@@ -1558,41 +1558,64 @@ function historyConstituents_(ss) {
 }
 
 /* ============================================================
-   섹터 점수 (참고 지표 — 예측력 검증 실패)
+   섹터 위험도 (검증 통과) + 수급 관측
    ============================================================ */
 
-/* 3.1년 · 62종목으로 백테스트한 결과 아래 팩터 중 어느 것도 20거래일 뒤
-   수익률을 유의하게 예측하지 못했다 (IC 전부 0.03 미만, t < 2).
-   그래서 이 점수는 "지금 어떤 상태인가"를 한 줄로 요약하는 용도이지
-   매수 신호가 아니다. 화면에도 그렇게 표시한다. */
-const SCORE_FACTORS = [
-  { key: 'flow',  label: '수급 강도',    note: '20일 누적 외인+기관 ÷ 평소 규모' },
-  { key: 'pers',  label: '수급 지속성',  note: '최근 20일 중 순매수 일수' },
-  { key: 'mom',   label: '모멘텀',       note: '60일 누적 등락률' },
-  { key: 'accum', label: '축적',         note: '가격은 빠졌는데 수급은 들어옴' },
-  { key: 'indi',  label: '개인 역지표',  note: '개인 순매도일수록 높음' },
+/* 수익률 예측은 실패했다. 코스피 185종목·3.2년으로 사전등록 108개 가설을
+   돌렸고 홀드아웃에서 살아남은 게 없다 (학습 t 4.25가 홀드아웃 0.73으로 붕괴).
+   그래서 "오를 섹터"는 이 앱이 말하지 않는다.
+
+   대신 "얼마나 흔들릴지"는 예측된다. 같은 방식으로 사전등록 24개를 돌려
+   18개가 홀드아웃까지 살아남았다. 섹터 단위로 다시 재도 마찬가지다 —
+   60일 실현변동성 → 이후 20거래일 변동성, 홀드아웃 순위상관 +0.757 (t 12.3,
+   날짜의 93%에서 양수). 최대낙폭도 +0.486 (t 6.0).
+
+   수급 변동성은 넣지 않았다. 홀드아웃만 보면 +0.570으로 좋지만 학습이
+   +0.153이라 국면 따라 흔들린다. 관측 수치로만 보여준다. */
+const RISK_CUTS = [35.2, 47.6];          // 섹터 60일 변동성(연율 %) 3구간 경계
+const RISK_BANDS = [
+  { band: '낮음', fvol: 35.0, fdd: 7.6, p7: 0.38 },
+  { band: '보통', fvol: 44.7, fdd: 9.9, p7: 0.70 },
+  { band: '높음', fvol: 69.6, fdd: 18.2, p7: 0.90 },
 ];
+const RISK_BASIS = {
+  holdout: '2025-08-22 ~ 2026-08-07',
+  icVol: 0.757, tVol: 12.3, icDd: 0.486, tDd: 6.0,
+  note: '60일 실현변동성으로 섹터를 줄 세우면 이후 20거래일의 변동성·낙폭 순서가 대체로 유지된다',
+};
+const RISK_CACHE_SEC = 3 * 3600;
+const ANNUALIZE = Math.sqrt(252);
 
-const SCORE_CACHE_SEC = 3 * 3600;
-
-function zmap_(raw) {
-  const ks = Object.keys(raw);
-  const vals = ks.map((k) => raw[k]).filter((v) => isFinite(v));
-  if (vals.length < 3) return {};
-  const m = vals.reduce((a, b) => a + b, 0) / vals.length;
-  const sd = Math.sqrt(vals.reduce((a, b) => a + (b - m) * (b - m), 0) / vals.length);
-  const out = {};
-  ks.forEach((k) => {
-    const z = sd ? (raw[k] - m) / sd : 0;
-    out[k] = Math.max(-3, Math.min(3, z));
-  });
-  return out;
+function stdev_(arr) {
+  if (!arr || arr.length < 2) return null;
+  const m = arr.reduce((a, b) => a + b, 0) / arr.length;
+  return Math.sqrt(arr.reduce((a, b) => a + (b - m) * (b - m), 0) / arr.length);
 }
 
-function sectorScores_(market) {
+/* 등락률을 곱해 지수를 만들고 고점 대비 최대 하락을 잰다.
+   합이나 평균으로 접으면 기간 낙폭이 아닌 값이 나온다. */
+function maxDrawdown_(pcts) {
+  let lvl = 1, peak = 1, worst = 0;
+  pcts.forEach((p) => {
+    lvl *= (1 + p / 100);
+    if (lvl > peak) peak = lvl;
+    const dd = lvl / peak - 1;
+    if (dd < worst) worst = dd;
+  });
+  return -worst * 100;
+}
+
+function riskBand_(vol60) {
+  if (vol60 == null) return '—';
+  if (vol60 < RISK_CUTS[0]) return '낮음';
+  if (vol60 < RISK_CUTS[1]) return '보통';
+  return '높음';
+}
+
+function sectorRisk_(market) {
   market = ['kr', 'kospi', 'kosdaq'].indexOf(market) > -1 ? market : 'kr';
   const cache = CacheService.getScriptCache();
-  const ck = 'score|' + historyCacheVersion_() + '|' + market;
+  const ck = 'risk|' + historyCacheVersion_() + '|' + market;
   try {
     const hit = cache.get(ck);
     if (hit) return JSON.parse(hit);
@@ -1601,7 +1624,7 @@ function sectorScores_(market) {
   const ss = getDb_();
   const rows = getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS).getDataRange().getValues().slice(1);
 
-  // 섹터별 일자 시계열로 접는다 (같은 날 코스피/코스닥이 따로 오므로 합친다)
+  // 같은 날 코스피/코스닥이 따로 오므로 섹터×날짜로 합친다
   const bySec = {};
   rows.forEach((r) => {
     const date = asDateStr_(r[0]);
@@ -1617,69 +1640,54 @@ function sectorScores_(market) {
     bySec[sid][date] = cur;
   });
 
-  const raw = { flow: {}, pers: {}, mom: {}, accum: {}, indi: {} };
-  const detail = {};
-  const ids = [];
-
+  const out = [];
   SECTOR_CONFIG.forEach((sec) => {
     const byDate = bySec[sec.id];
     if (!byDate) return;
     const dates = Object.keys(byDate).sort();
     if (dates.length < 60) return;
-    ids.push(sec.id);
 
     const last = (n) => dates.slice(-n).map((d) => byDate[d]);
+    const pctOf = (arr) => arr.map((x) => (x.n ? x.pctSum / x.n : 0));
     const w20 = last(20);
     const w60 = last(60);
 
+    const sd60 = stdev_(pctOf(w60));
+    const sd20 = stdev_(pctOf(w20));
+    const vol60 = sd60 == null ? null : +(sd60 * ANNUALIZE).toFixed(1);
+    const vol20 = sd20 == null ? null : +(sd20 * ANNUALIZE).toFixed(1);
     const net20 = w20.reduce((a, x) => a + x.net, 0);
-    const absMean = w60.reduce((a, x) => a + Math.abs(x.net), 0) / w60.length || 1;
-    const buyDays = w20.filter((x) => x.net > 0).length;
-    const cum = (arr) => arr.reduce((acc, x) => acc * (1 + (x.n ? x.pctSum / x.n : 0) / 100), 1);
-    const mom60 = (cum(w60) - 1) * 100;
-    const ret20 = (cum(w20) - 1) * 100;
-    const indi20 = -w20.reduce((a, x) => a + x.indi, 0);
+    const flowSd = stdev_(w20.map((x) => x.net));
 
-    raw.flow[sec.id] = net20 / absMean;
-    raw.pers[sec.id] = buyDays / w20.length - 0.5;
-    raw.mom[sec.id] = mom60;
-    raw.indi[sec.id] = indi20;
-    detail[sec.id] = {
-      net20: Math.round(net20), buyDays: buyDays, mom60: +mom60.toFixed(1),
-      ret20: +ret20.toFixed(1), indi20: Math.round(-indi20),
+    out.push({
+      sectorId: sec.id, name: sec.name, icon: sec.icon,
+      vol60: vol60, vol20: vol20,
+      band: riskBand_(vol60),
+      rising: vol60 != null && vol20 != null && vol20 > vol60,
+      dd60: +maxDrawdown_(pctOf(w60)).toFixed(1),
+      flowVol20: flowSd == null ? null : Math.round(flowSd),
+      net20: Math.round(net20),
+      indi20: Math.round(w20.reduce((a, x) => a + x.indi, 0)),
+      buyDays: w20.filter((x) => x.net > 0).length,
+      ret20: +((pctOf(w20).reduce((a, p) => a * (1 + p / 100), 1) - 1) * 100).toFixed(1),
       lastDate: dates[dates.length - 1],
-    };
+    });
   });
 
-  const zFlow = zmap_(raw.flow);
-  const zRet = zmap_((function () { const o = {}; ids.forEach((i) => { o[i] = -detail[i].ret20; }); return o; })());
-  ids.forEach((i) => { raw.accum[i] = Math.min(zFlow[i] || 0, zRet[i] || 0); });
-
-  const z = { flow: zFlow, pers: zmap_(raw.pers), mom: zmap_(raw.mom), accum: zmap_(raw.accum), indi: zmap_(raw.indi) };
-
-  const out = ids.map((id) => {
-    const sec = SECTOR_CONFIG.filter((s) => s.id === id)[0];
-    const factors = SCORE_FACTORS.map((f) => ({
-      key: f.key, label: f.label, note: f.note,
-      z: +((z[f.key][id] || 0)).toFixed(2),
-    }));
-    const mean = factors.reduce((a, f) => a + f.z, 0) / factors.length;
-    return {
-      sectorId: id, name: sec.name, icon: sec.icon,
-      score: +mean.toFixed(2),
-      factors: factors,
-      detail: detail[id],
-    };
-  }).sort((a, b) => b.score - a.score);
+  out.sort((a, b) => (b.vol60 || 0) - (a.vol60 || 0));
+  out.forEach((s, i) => { s.rank = i + 1; });
 
   const res = {
     market: market,
-    asOf: out.length ? out[0].detail.lastDate : '',
-    validated: false,
-    caveat: '3.1년·62종목 백테스트에서 20거래일 수익률 예측력이 확인되지 않았습니다 (IC<0.03). 매수 신호가 아니라 현재 상태 요약입니다.',
+    asOf: out.length ? out[0].lastDate : '',
+    validated: true,
+    cuts: RISK_CUTS,
+    bands: RISK_BANDS,
+    basis: RISK_BASIS,
+    caveat: '변동성·낙폭 예측입니다. 오를지 내릴지는 말하지 않습니다 — 수익률 예측은 검증에 실패했습니다.',
     sectors: out,
   };
-  try { cache.put(ck, JSON.stringify(res), SCORE_CACHE_SEC); } catch (e) { /* 무시 */ }
+  try { cache.put(ck, JSON.stringify(res), RISK_CACHE_SEC); } catch (e) { /* 무시 */ }
   return res;
 }
 

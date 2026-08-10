@@ -195,7 +195,7 @@ function render() {
   el.innerHTML = '';
   if (currentPage === 'flow') renderFlowPage(el);
   else if (currentPage === 'alerts') renderAlertsPage(el);
-  else if (currentPage === 'score') renderScorePage(el);
+  else if (currentPage === 'risk') renderRiskPage(el);
   else if (currentPage === 'trend') renderTrendPage(el);
   else if (currentPage === 'history') renderHistoryPage(el);
   else if (currentPage === 'signal') renderSignalPage(el);
@@ -432,87 +432,106 @@ function sectorCardHtml(s) {
 }
 
 /* ============================================================
-   섹터 점수
+   섹터 위험도 (검증 통과) + 수급 관측
    ============================================================ */
 
-let SCORE = null;
-let scoreState = 'idle';
+let RISK = null;
+let riskState = 'idle';
 
-async function fetchScore(onLoading) {
+async function fetchRisk(onLoading) {
   const mk = isKrFilter_(marketFilter) ? marketFilter : 'kr';
-  if (SCORE && SCORE.market === mk) { scoreState = 'ready'; return; }
-  if (!isConfigured()) { scoreState = 'error'; return; }
-  scoreState = 'loading';
+  if (RISK && RISK.market === mk) { riskState = 'ready'; return; }
+  if (!isConfigured()) { riskState = 'error'; return; }
+  riskState = 'loading';
   if (onLoading) onLoading();
   try {
-    const res = await fetch(`${gasUrl('score')}&market=${mk}`);
+    const res = await fetch(`${gasUrl('risk')}&market=${mk}`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    SCORE = data;
-    scoreState = 'ready';
+    RISK = data;
+    riskState = 'ready';
   } catch (err) {
-    scoreState = 'error';
+    riskState = 'error';
   }
 }
 
-function scoreBar(z) {
-  // -3~+3을 0~100%로 옮기고 0선을 가운데 둔다
-  const pct = Math.max(0, Math.min(100, (z + 3) / 6 * 100));
-  const mid = 50;
-  const left = Math.min(pct, mid);
-  const width = Math.abs(pct - mid);
-  return `<div class="zbar"><div class="zbar-zero"></div>
-    <div class="zbar-fill ${z >= 0 ? 'zbar-up' : 'zbar-down'}" style="left:${left}%;width:${width}%"></div></div>`;
+const BAND_CLASS = { '높음': 'band-high', '보통': 'band-mid', '낮음': 'band-low' };
+
+/* 변동성 막대는 0이 기준점이라 한쪽으로만 찬다 (z처럼 가운데를 두지 않는다).
+   100%를 최대치로 잡으면 대부분 구간에서 눈에 보이는 차이가 난다. */
+function volBar(vol, band) {
+  const pct = Math.max(2, Math.min(100, (vol || 0)));
+  return `<div class="zbar"><div class="zbar-fill ${BAND_CLASS[band] || 'band-mid'}"
+    style="left:0;width:${pct}%"></div></div>`;
 }
 
-function renderScorePage(el) {
-  if (scoreState === 'loading' || scoreState === 'idle') {
-    el.innerHTML = `<div class="section-title">섹터 점수</div><div class="empty-state">계산 중이에요…</div>`;
+function renderRiskPage(el) {
+  if (riskState === 'loading' || riskState === 'idle') {
+    el.innerHTML = `<div class="section-title">섹터 위험도</div><div class="empty-state">계산 중이에요…</div>`;
     return;
   }
-  if (scoreState === 'error' || !SCORE) {
-    el.innerHTML = `<div class="section-title">섹터 점수</div>
-      <div class="empty-state"><div class="empty-icon">⚠️</div>점수를 불러오지 못했어요. GAS를 최신 코드로 배포했는지 확인해주세요.</div>`;
+  if (riskState === 'error' || !RISK) {
+    el.innerHTML = `<div class="section-title">섹터 위험도</div>
+      <div class="empty-state"><div class="empty-icon">⚠️</div>위험도를 불러오지 못했어요. GAS를 최신 코드로 배포했는지 확인해주세요.</div>`;
     return;
   }
   if (marketFilter === 'us') {
-    el.innerHTML = `<div class="section-title">섹터 점수</div>
-      <div class="empty-state"><div class="empty-icon">🇺🇸</div>점수는 수급을 쓰기 때문에 국장만 계산됩니다.</div>`;
+    el.innerHTML = `<div class="section-title">섹터 위험도</div>
+      <div class="empty-state"><div class="empty-icon">🇺🇸</div>위험도는 국내 일별 데이터로 계산해요. 미국 섹터는 아직 없습니다.</div>`;
     return;
   }
 
-  const cards = SCORE.sectors.map((s, i) => `
+  const b = RISK.basis;
+  const cards = RISK.sectors.map((s) => {
+    const cal = (RISK.bands || []).filter((x) => x.band === s.band)[0];
+    return `
     <div class="card score-card">
       <div class="score-head">
-        <div class="score-rank">${i + 1}</div>
+        <div class="score-rank">${s.rank}</div>
         <div class="score-name">${s.icon} ${s.name}</div>
-        <div class="score-value ${s.score >= 0 ? 'val-up' : 'val-down'}">${s.score >= 0 ? '+' : ''}${s.score.toFixed(2)}σ</div>
+        <div class="band-chip ${BAND_CLASS[s.band] || ''}">${s.band}</div>
       </div>
       <div class="score-factors">
-        ${s.factors.map((f) => `
-          <div class="zrow">
-            <span class="zlabel">${f.label}</span>
-            ${scoreBar(f.z)}
-            <span class="zval ${f.z >= 0 ? 'val-up' : 'val-down'}">${f.z >= 0 ? '+' : ''}${f.z.toFixed(2)}</span>
-          </div>`).join('')}
+        <div class="zrow">
+          <span class="zlabel">변동성 60일</span>
+          ${volBar(s.vol60, s.band)}
+          <span class="zval">${s.vol60 == null ? '—' : s.vol60 + '%'}</span>
+        </div>
+        <div class="zrow">
+          <span class="zlabel">변동성 20일</span>
+          ${volBar(s.vol20, s.band)}
+          <span class="zval">${s.vol20 == null ? '—' : s.vol20 + '%'}${s.rising ? ' ↑' : ''}</span>
+        </div>
       </div>
+      ${cal ? `<div class="risk-expect">이 구간이었을 때 이후 20거래일 실적 —
+        평균 최대낙폭 <b>${cal.fdd}%</b> · 7% 넘게 빠진 경우 <b>${Math.round(cal.p7 * 100)}%</b></div>` : ''}
       <div class="score-detail">
-        20일 수급 ${fmtFlow(s.detail.net20)} · 순매수 ${s.detail.buyDays}/20일 ·
-        60일 ${fmtPct(s.detail.mom60)} · 20일 ${fmtPct(s.detail.ret20)} ·
-        개인 ${fmtFlow(s.detail.indi20)}
+        최근 60일 낙폭 ${s.dd60}% · 20일 등락 ${fmtPct(s.ret20)} ·
+        20일 수급 ${fmtFlow(s.net20)} (순매수 ${s.buyDays}/20일) ·
+        수급 변동성 ${s.flowVol20 == null ? '—' : fmtFlow(s.flowVol20)}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   el.innerHTML = `
     <div class="warn-box">
-      <div class="warn-title">⚠️ 매수 신호가 아닙니다</div>
-      <div class="warn-body">${SCORE.caveat}<br>
-      숫자와 근거는 실제 데이터지만, 이 점수가 높다고 오른다는 검증은 <b>실패했습니다</b>.
-      "지금 어느 섹터에 무슨 일이 벌어지고 있나"를 한 줄로 요약하는 용도로만 보세요.</div>
+      <div class="warn-title">⚠️ 오를 섹터를 고르는 화면이 아닙니다</div>
+      <div class="warn-body">${RISK.caveat}<br>
+      위험도가 낮다고 오른다는 뜻이 아니고, 높다고 떨어진다는 뜻도 아닙니다.
+      <b>얼마나 흔들릴지</b>만 봅니다.</div>
     </div>
-    <div class="section-title">${MARKET_LABEL[isKrFilter_(marketFilter) ? marketFilter : 'kr']} 섹터 점수 · ${SCORE.asOf} 기준</div>
+    <div class="section-title">${MARKET_LABEL[isKrFilter_(marketFilter) ? marketFilter : 'kr']} 섹터 위험도 · ${RISK.asOf} 기준</div>
     ${cards}
-    <div class="signal-note">점수 = 5개 팩터 z값의 평균. z는 섹터 간 상대값이라 ±0에 가까우면 평범, +1σ면 상위권이라는 뜻입니다.</div>
+    <div class="signal-note">
+      순위는 60일 실현변동성(연율) 기준입니다. 구간은 ${RISK.cuts[0]}% 미만 낮음 /
+      ${RISK.cuts[1]}% 이상 높음.<br>
+      검증: 홀드아웃 ${b.holdout} 구간에서 ${b.note}. 이후 변동성 순위상관
+      <b>+${b.icVol}</b> (t ${b.tVol}), 최대낙폭 <b>+${b.icDd}</b> (t ${b.tDd}).
+      학습 구간과 홀드아웃을 나눠 검증했고, 같은 방식으로 돌린 수익률 예측
+      108개 가설은 전부 탈락했습니다.<br>
+      "이후 20거래일 실적"은 홀드아웃 구간에서 그 밴드에 있던 섹터들의 실제
+      결과입니다. 예언이 아니라 과거 기록입니다.
+    </div>
   `;
 }
 
@@ -1327,8 +1346,8 @@ function init() {
         await fetchTrend(render);
         render();
       }
-      if (currentPage === 'score') {
-        await fetchScore(render);
+      if (currentPage === 'risk') {
+        await fetchRisk(render);
         render();
       }
     });
@@ -1345,9 +1364,9 @@ function init() {
         await fetchTrend(render);
         render();
       }
-      if (currentPage === 'score') {
-        SCORE = null;
-        await fetchScore(render);
+      if (currentPage === 'risk') {
+        RISK = null;
+        await fetchRisk(render);
         render();
       }
     });

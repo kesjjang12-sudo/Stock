@@ -167,6 +167,7 @@ function doGet(e) {
     if (action === 'syncEtf') return jsonOut_(syncEtfHoldings());
     if (action === 'profile') return jsonOut_(profileRefresh_());
     if (action === 'risk') return jsonOut_(sectorRisk_(params.market));
+    if (action === 'target') return jsonOut_(calculateTargetScore());
     if (action === 'rows') return jsonOut_(rawSectorDaily_(params.sector, params.from, params.to));
     if (action === 'backfill') {
       const r = backfillSectorDaily_(3.5 * 60 * 1000, params.reset === '1', params.sector);
@@ -1688,6 +1689,312 @@ function sectorRisk_(market) {
     sectors: out,
   };
   try { cache.put(ck, JSON.stringify(res), RISK_CACHE_SEC); } catch (e) { /* 무시 */ }
+  return res;
+}
+
+/* ============================================================
+   탑다운 매수 관점 스코어 (섹터 국면 → 개별 종목)
+   ============================================================ */
+
+/* 주의 — 이 점수의 예측력은 아직 검증되지 않았다.
+   같은 데이터로 돌린 수익률 예측 108개 가설은 홀드아웃에서 전멸했고,
+   여기 쓰이는 수급·모멘텀 계열 팩터도 그 안에 포함돼 있었다.
+   화면에 붙일 때는 반드시 그 사실을 함께 표시할 것. */
+
+/* 튜닝 지점은 전부 여기 모아둔다. 로직 본문에 숫자를 박지 않는다. */
+const TARGET_W = {
+  sector: { squeeze: 0.40, divergence: 0.60 },   // Phase 1 배분
+  stock: { smart: 0.65, resilience: 0.35 },      // Phase 2 배분
+  blend: { sector: 0.40, stock: 0.60 },          // 최종 결합
+
+  squeeze: { hi: 1.00, lo: 0.60 },               // vol20/vol60 이 lo면 100점, hi면 0점
+  divergence: {
+    ddMin: 10, ddFull: 30,                       // 조정 폭 10%부터 인정, 30%에서 만점
+    parts: { dd: 0.40, size: 0.35, trend: 0.25 },
+  },
+  penalty: {
+    expansionMult: 1.50, expansionCut: 35,       // vol20 이 vol60 의 1.5배 초과 → 발산
+    flowNegDays: 12, flowNegCut: 25,             // 20일 중 12일 이상 순매도 + 누적 음수
+  },
+  smart: { scale: 0.35 },                        // 평균수급/수급표준편차 를 이 값으로 나눠 squash
+  resilience: { slopeFloor: -0.60, slopeCap: 0.80, ddBonus: 0.35 },  // 하루당 %
+
+  topSectors: 3,                                 // Phase 2를 적용할 상위 섹터 수
+  pages: 9,                                      // 10거래일 × 9 = 90거래일이면 vol60까지 넉넉
+};
+
+const TARGET_CACHE_SEC = 3600;
+
+function clamp01_(x) {
+  return !isFinite(x) ? 0 : Math.max(0, Math.min(1, x));
+}
+
+function clampScore_(x) {
+  return !isFinite(x) ? 0 : +Math.max(0, Math.min(100, x)).toFixed(1);
+}
+
+function sum_(arr) {
+  return arr.reduce((a, b) => a + b, 0);
+}
+
+/* ---- 누수 방지의 핵심 ----
+   모든 시계열은 '최신일 우선'이다. asOf 인덱스 i를 기준으로 과거를 보려면
+   인덱스를 늘려야 한다 (i, i+1, i+2 …). i-1은 미래다.
+   아래 슬라이스 헬퍼만 통해서 데이터를 읽으면 미래를 참조할 방법이 없다. */
+function winFrom_(arr, i, n) {
+  const out = [];
+  const end = Math.min(arr.length, i + n);
+  for (let j = i; j < end; j++) {
+    if (arr[j] !== null && arr[j] !== undefined && isFinite(arr[j])) out.push(arr[j]);
+  }
+  return out;
+}
+
+/* parseTrendHistory_ 결과(최신일 우선)를 계산용 배열로 편다.
+   ret[j] 는 j일의 전일 대비 등락률 — 바로 다음 원소(j+1)가 전 거래일이다. */
+function buildStockSeries_(hist) {
+  const n = hist.length;
+  const close = [];
+  const ret = [];
+  const flow = [];
+  for (let j = 0; j < n; j++) {
+    close.push(hist[j].closePrice);
+    flow.push((hist[j].frgnFlow || 0) + (hist[j].orgFlow || 0));
+    const prev = hist[j + 1];
+    ret.push(prev && prev.closePrice && hist[j].closePrice
+      ? (hist[j].closePrice / prev.closePrice - 1) * 100 : null);
+  }
+  return { close: close, ret: ret, flow: flow, len: n };
+}
+
+function volFrom_(ret, i, n) {
+  const v = winFrom_(ret, i, n);
+  if (v.length < Math.max(5, Math.floor(n * 0.6))) return null;
+  return stdev_(v) * ANNUALIZE;
+}
+
+/* maxDrawdown_ 은 과거→최근 순으로 곱해 나가므로 최신일 우선 배열은 뒤집어야 한다.
+   안 뒤집으면 상승장을 하락장으로 읽는다. */
+function ddFrom_(ret, i, n) {
+  const v = winFrom_(ret, i, n).reverse();
+  return v.length < 3 ? null : maxDrawdown_(v);
+}
+
+/* 최근 n일 종가의 회귀 기울기를 '하루당 %'로. 가격 수준에 무관하게 비교하려고
+   평균가로 나눈다. */
+function slopePctPerDay_(close, i, n) {
+  const v = winFrom_(close, i, n).reverse();
+  if (v.length < 3) return null;
+  const mid = (v.length - 1) / 2;
+  const mean = sum_(v) / v.length;
+  if (!mean) return null;
+  let num = 0, den = 0;
+  for (let k = 0; k < v.length; k++) {
+    num += (k - mid) * (v[k] - mean);
+    den += (k - mid) * (k - mid);
+  }
+  return den ? (num / den) / mean * 100 : null;
+}
+
+function squash01_(x) {
+  // tanh 을 0~1로. GAS V8에 Math.tanh 이 있지만 없더라도 동작하게 둔다.
+  const t = Math.tanh ? Math.tanh(x) : (Math.exp(2 * x) - 1) / (Math.exp(2 * x) + 1);
+  return (t + 1) / 2;
+}
+
+/* ---- Phase 1: 섹터 국면 점수 ---- */
+function sectorRegimeScore_(series, i) {
+  const W = TARGET_W;
+  const vol60 = volFrom_(series.ret, i, 60);
+  const vol20 = volFrom_(series.ret, i, 20);
+  if (vol60 == null || vol20 == null || !vol60) return null;
+
+  const ratio = vol20 / vol60;
+  const squeeze = clamp01_((W.squeeze.hi - ratio) / (W.squeeze.hi - W.squeeze.lo)) * 100;
+
+  const dd60 = ddFrom_(series.ret, i, 60);
+  const f20 = winFrom_(series.flow, i, 20);
+  const net20 = sum_(f20);
+  const flowSd = stdev_(f20);
+  const recent10 = sum_(winFrom_(series.flow, i, 10));
+  const prior10 = sum_(winFrom_(series.flow, i + 10, 10));
+
+  let divergence = 0;
+  const D = W.divergence;
+  if (dd60 != null && dd60 >= D.ddMin && net20 > 0) {
+    const ddPart = clamp01_((dd60 - D.ddMin) / (D.ddFull - D.ddMin));
+    // 규모는 잡음 대비로 잰다. 20일 누적의 잡음 크기는 대략 표준편차×√20.
+    const noise = (flowSd || 0) * Math.sqrt(20);
+    const sizePart = noise ? clamp01_(net20 / noise) : 0;
+    const trendPart = clamp01_((recent10 - prior10) / (noise / Math.sqrt(2) || 1) * 0.5 + 0.5);
+    divergence = 100 * (D.parts.dd * ddPart + D.parts.size * sizePart + D.parts.trend * trendPart);
+  }
+
+  let penalty = 0;
+  const P = W.penalty;
+  if (ratio > P.expansionMult) {
+    penalty += P.expansionCut * clamp01_((ratio - P.expansionMult) / 0.5 + 0.5);
+  }
+  const sellDays = f20.filter((x) => x < 0).length;
+  if (net20 < 0 && sellDays >= P.flowNegDays) {
+    penalty += P.flowNegCut * clamp01_(sellDays / f20.length);
+  }
+
+  const raw = W.sector.squeeze * squeeze + W.sector.divergence * divergence - penalty;
+  return {
+    score: clampScore_(raw),
+    vol60: +vol60.toFixed(1), vol20: +vol20.toFixed(1), volRatio: +ratio.toFixed(2),
+    dd60: dd60 == null ? null : +dd60.toFixed(1),
+    net20: Math.round(net20), flowVol20: flowSd == null ? null : Math.round(flowSd),
+    squeeze: clampScore_(squeeze), divergence: clampScore_(divergence),
+    penalty: +penalty.toFixed(1),
+    expanding: ratio > P.expansionMult,
+  };
+}
+
+/* ---- Phase 2: 개별 종목 점수 ---- */
+function stockSelectionScore_(series, i) {
+  const W = TARGET_W;
+  const f20 = winFrom_(series.flow, i, 20);
+  if (f20.length < 10) return null;
+
+  const meanFlow = sum_(f20) / f20.length;
+  const flowSd = stdev_(f20);
+  /* 스마트머니 안정성 = 평균 순매수 ÷ 순매수 변동성. 꾸준히 담을수록 커진다.
+     변동성이 0이면 나눌 수 없는데, 그건 '흔들림 없이 일정하게 담았다'는 뜻이라
+     최고점이어야 한다. 0으로 두면 가장 꾸준한 종목이 중립(50)으로 깎인다. */
+  let smartRaw;
+  if (!flowSd) smartRaw = meanFlow > 0 ? Infinity : (meanFlow < 0 ? -Infinity : 0);
+  else smartRaw = meanFlow / flowSd;
+  const smart = smartRaw === Infinity ? 100 : (smartRaw === -Infinity ? 0
+    : squash01_(smartRaw / W.smart.scale) * 100);
+
+  const dd60 = ddFrom_(series.ret, i, 60);
+  const slope5 = slopePctPerDay_(series.close, i, 5);
+  const R = W.resilience;
+  let resilience = 0;
+  if (slope5 != null) {
+    const base = clamp01_((slope5 - R.slopeFloor) / (R.slopeCap - R.slopeFloor)) * 100;
+    // 많이 빠진 상태에서 버티는 게 더 의미 있다 → 낙폭만큼 가점 배수
+    const ddBoost = 1 + R.ddBonus * clamp01_((dd60 || 0) / 25);
+    resilience = Math.min(100, base * ddBoost);
+  }
+
+  const raw = W.stock.smart * smart + W.stock.resilience * resilience;
+  return {
+    score: clampScore_(raw),
+    smartRatio: isFinite(smartRaw) ? +smartRaw.toFixed(2) : (smartRaw > 0 ? 99 : -99), smart: clampScore_(smart),
+    resilience: clampScore_(resilience),
+    slope5: slope5 == null ? null : +slope5.toFixed(2),
+    dd60: dd60 == null ? null : +dd60.toFixed(1),
+    net20: Math.round(sum_(f20)), flowVol20: flowSd == null ? null : Math.round(flowSd),
+  };
+}
+
+/* 구성종목 이력을 섹터 지수로 접는다 (동일가중 수익률, 수급은 합계).
+   화면의 위험도 탭과 같은 정의라 두 화면 숫자가 어긋나지 않는다. */
+function foldSectorSeries_(memberSeries) {
+  const len = Math.max.apply(null, memberSeries.map((s) => s.len).concat([0]));
+  const ret = [], flow = [], close = [];
+  for (let j = 0; j < len; j++) {
+    const rs = [];
+    let fs = 0;
+    memberSeries.forEach((s) => {
+      if (j < s.len && s.ret[j] !== null && isFinite(s.ret[j])) {
+        rs.push(s.ret[j]);
+        fs += s.flow[j] || 0;
+      }
+    });
+    ret.push(rs.length >= 3 ? sum_(rs) / rs.length : null);
+    flow.push(fs);
+    close.push(null);
+  }
+  return { ret: ret, flow: flow, close: close, len: len };
+}
+
+/* 메인. i=0(가장 최근 거래일) 기준으로 점수를 낸다.
+   asOfIndex를 넘기면 과거 시점 기준으로도 매길 수 있다 (백테스트용). */
+function calculateTargetScore(asOfIndex) {
+  const i = (asOfIndex && asOfIndex > 0) ? asOfIndex : 0;
+  const cache = CacheService.getScriptCache();
+  const ck = 'target|' + historyCacheVersion_() + '|' + i;
+  if (!asOfIndex) {
+    try {
+      const hit = cache.get(ck);
+      if (hit) return JSON.parse(hit);
+    } catch (e) { /* 무시 */ }
+  }
+
+  const ss = getDb_();
+  const active = activeKrStocks_(ss);
+  const marketOf = loadMarketMap_(ss);
+
+  const codes = [];
+  const owner = {};
+  SECTOR_CONFIG.forEach((sec) => {
+    (active[sec.id] || []).forEach((s) => {
+      if (owner[s.code] === undefined) { codes.push(s.code); owner[s.code] = []; }
+      owner[s.code].push({ sectorId: sec.id, name: s.name });
+    });
+  });
+  if (!codes.length) return { error: 'ETF 구성종목이 아직 없습니다. syncEtf를 먼저 실행하세요.' };
+
+  const hists = fetchTrendDeepMulti_(codes, TARGET_W.pages + Math.ceil(i / 10));
+  const series = {};
+  codes.forEach((c) => { series[c] = buildStockSeries_(hists[c] || []); });
+
+  // Phase 1
+  const sectors = [];
+  SECTOR_CONFIG.forEach((sec) => {
+    const members = (active[sec.id] || []).filter((s) => series[s.code] && series[s.code].len > 61);
+    if (members.length < 3) return;
+    const folded = foldSectorSeries_(members.map((s) => series[s.code]));
+    const r = sectorRegimeScore_(folded, i);
+    if (!r) return;
+    r.sectorId = sec.id;
+    r.name = sec.name;
+    r.icon = sec.icon;
+    r.memberCount = members.length;
+    r.members = members.map((s) => s.code);
+    sectors.push(r);
+  });
+  sectors.sort((a, b) => b.score - a.score);
+  sectors.forEach((s, k) => { s.rank = k + 1; });
+
+  // Phase 2 — 상위 섹터 안에서만 타겟을 고른다
+  const picked = sectors.slice(0, TARGET_W.topSectors);
+  const targets = [];
+  picked.forEach((sec) => {
+    sec.members.forEach((code) => {
+      const st = stockSelectionScore_(series[code], i);
+      if (!st) return;
+      const nameRow = (owner[code] || []).filter((o) => o.sectorId === sec.sectorId)[0];
+      const final = TARGET_W.blend.sector * sec.score + TARGET_W.blend.stock * st.score;
+      targets.push({
+        code: code,
+        name: nameRow ? nameRow.name : code,
+        market: marketOf[code] || 'KOSPI',
+        sectorId: sec.sectorId, sectorName: sec.name, sectorScore: sec.score,
+        stockScore: st.score,
+        buyScore: clampScore_(final),
+        detail: st,
+      });
+    });
+  });
+  targets.sort((a, b) => b.buyScore - a.buyScore);
+
+  const res = {
+    asOf: (hists[codes[0]] && hists[codes[0]][i]) ? hists[codes[0]][i].date : '',
+    asOfIndex: i,
+    validated: false,
+    caveat: '예측력이 검증되지 않은 점수입니다. 같은 데이터로 돌린 수익률 예측 108개 가설은 홀드아웃에서 전부 탈락했고, 여기 쓰인 수급·모멘텀 팩터도 그 안에 있었습니다.',
+    weights: TARGET_W,
+    sectors: sectors,
+    targets: targets,
+  };
+  if (!asOfIndex) {
+    try { cache.put(ck, JSON.stringify(res), TARGET_CACHE_SEC); } catch (e) { /* 무시 */ }
+  }
   return res;
 }
 

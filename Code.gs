@@ -169,7 +169,7 @@ function doGet(e) {
     if (action === 'score') return jsonOut_(sectorScores_(params.market));
     if (action === 'rows') return jsonOut_(rawSectorDaily_(params.sector, params.from, params.to));
     if (action === 'backfill') {
-      const r = backfillSectorDaily_(4.5 * 60 * 1000, params.reset === '1', params.sector);
+      const r = backfillSectorDaily_(3.5 * 60 * 1000, params.reset === '1', params.sector);
       return htmlOut_(r.finished ? '백필 완료' : '백필 진행 중',
         r.log.join('<br>') + '<br><br>' + r.done + ' / ' + r.total + ' 섹터' +
         (r.finished ? '<br><br>끝났습니다. 대시보드 추이 탭을 확인하세요.' : '<br><br>아직 남았습니다. 이 페이지를 <b>새로고침</b>하면 이어서 진행합니다.'));
@@ -1243,11 +1243,55 @@ function fetchTrendDeep_(code, pages) {
   return hist;
 }
 
+/* 위를 종목마다 부르면 섹터 하나에 10종목 × 40페이지 = 400회 왕복이라
+   GAS 6분 한도에 계속 부딪혔다. 페이지는 한 칸씩만 전진시키되 종목은
+   한꺼번에 묶어 보낸다. 요청 수는 같지만 왕복 대기가 10분의 1로 준다.
+   커서는 종목마다 따로 들고 간다 (상장일이 달라 끝나는 시점이 다르다). */
+function fetchTrendDeepMulti_(codes, pages) {
+  const state = {};
+  codes.forEach((c) => { state[c] = { seen: {}, hist: [], cursor: '', done: false }; });
+
+  for (let p = 0; p < pages; p++) {
+    const live = codes.filter((c) => !state[c].done);
+    if (!live.length) break;
+
+    const res = fetchAllChunked_(live.map((c) => ({
+      url: trendUrl_(c, state[c].cursor),
+      muteHttpExceptions: true,
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    })));
+
+    live.forEach((c, i) => {
+      const st = state[c];
+      if (!res[i]) { st.done = true; return; }
+      let rows;
+      try { rows = parseTrendHistory_(res[i].getContentText()); } catch (e) { st.done = true; return; }
+      if (!rows.length) { st.done = true; return; }
+
+      let added = 0;
+      rows.forEach((r) => {
+        if (st.seen[r.date]) return;
+        st.seen[r.date] = true;
+        st.hist.push(r);
+        added++;
+      });
+      if (!added) { st.done = true; return; }
+
+      st.cursor = st.hist[st.hist.length - 1].date.replace(/-/g, '');
+    });
+  }
+
+  const out = {};
+  codes.forEach((c) => { out[c] = state[c].hist.sort((a, b) => (a.date < b.date ? 1 : -1)); });
+  return out;
+}
+
 function backfillSector_(sec, krStocks, marketOf) {
   const byKey = {};
 
+  const hists = fetchTrendDeepMulti_(krStocks.map((s) => s.code), BACKFILL_TREND_PAGES);
   krStocks.forEach((s) => {
-    addKrDaily_(byKey, sec.id, marketOf[s.code] || 'KOSPI', fetchTrendDeep_(s.code, BACKFILL_TREND_PAGES));
+    addKrDaily_(byKey, sec.id, marketOf[s.code] || 'KOSPI', hists[s.code]);
   });
 
   sec.us.forEach((s) => {
@@ -1314,13 +1358,26 @@ function backfillSectorDailyInner_(maxMs, reset, onlyId) {
   if (!(cursor >= 0)) cursor = 0;
   if (cursor > 0) log.push('↪︎ ' + cursor + '번 섹터부터 이어서 진행 (처음부터 하려면 &reset=1)');
 
-  while (cursor < SECTOR_CONFIG.length && Date.now() - started < maxMs) {
+  /* 예산 확인이 섹터 시작 '전'에만 걸려서, 4분 지난 시점에 1.5분짜리 섹터를
+     시작하면 GAS 6분 한도를 넘겨 실행이 통째로 죽는다. 그러면 커서 저장도
+     안 되고 시트 쓰기 도중에 잘릴 수도 있다. 직전 섹터가 걸린 만큼은
+     남아 있을 때만 다음 섹터를 시작한다. */
+  let slowest = 0;
+  while (cursor < SECTOR_CONFIG.length) {
+    const left = maxMs - (Date.now() - started);
+    if (left <= 0 || (slowest && left < slowest * 1.3)) {
+      log.push('⏸ 남은 시간이 부족해 여기서 끊습니다 — 새로고침하면 ' + cursor + '번부터 이어집니다');
+      break;
+    }
+    const t0 = Date.now();
     const sec = SECTOR_CONFIG[cursor];
     const byKey = backfillSector_(sec, active[sec.id] || [], marketOf);
     upsertSectorDaily_(sheet, byKey);
-    log.push('✅ ' + sec.name + ' — ' + Object.keys(byKey).length + '행 (' + (active[sec.id] || []).length + '종목)');
     cursor++;
     props.setProperty('BACKFILL_CURSOR', String(cursor));
+    slowest = Math.max(slowest, Date.now() - t0);
+    log.push('✅ ' + sec.name + ' — ' + Object.keys(byKey).length + '행 ('
+      + (active[sec.id] || []).length + '종목, ' + Math.round((Date.now() - t0) / 1000) + '초)');
   }
 
   invalidateHistoryCache_();

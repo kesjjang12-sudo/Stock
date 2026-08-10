@@ -513,6 +513,15 @@ function renderRiskPage(el) {
     </div>`;
   }).join('');
 
+  /* 장 전체가 흔들리면 전 섹터가 '높음'으로 몰린다. 게이지가 고장난 게 아니라
+     그 자체가 읽어야 할 신호라서, 몇 개가 어느 밴드인지 먼저 보여준다. */
+  const cnt = { '높음': 0, '보통': 0, '낮음': 0 };
+  RISK.sectors.forEach((s) => { if (cnt[s.band] !== undefined) cnt[s.band]++; });
+  const total = RISK.sectors.length;
+  const overall = cnt['높음'] >= total * 0.7 ? '지금은 장 전체가 흔들리는 국면입니다'
+    : cnt['낮음'] >= total * 0.7 ? '지금은 장 전체가 잔잔한 국면입니다'
+    : '섹터별로 위험 수준이 갈립니다';
+
   el.innerHTML = `
     <div class="warn-box">
       <div class="warn-title">⚠️ 오를 섹터를 고르는 화면이 아닙니다</div>
@@ -521,6 +530,10 @@ function renderRiskPage(el) {
       <b>얼마나 흔들릴지</b>만 봅니다.</div>
     </div>
     <div class="section-title">${MARKET_LABEL[isKrFilter_(marketFilter) ? marketFilter : 'kr']} 섹터 위험도 · ${RISK.asOf} 기준</div>
+    <div class="card risk-overall">
+      <div class="risk-overall-line">${overall}</div>
+      <div class="risk-overall-sub">높음 ${cnt['높음']} · 보통 ${cnt['보통']} · 낮음 ${cnt['낮음']} (전체 ${total}개 섹터)</div>
+    </div>
     ${cards}
     <div class="signal-note">
       순위는 60일 실현변동성(연율) 기준입니다. 구간은 ${RISK.cuts[0]}% 미만 낮음 /
@@ -530,7 +543,9 @@ function renderRiskPage(el) {
       학습 구간과 홀드아웃을 나눠 검증했고, 같은 방식으로 돌린 수익률 예측
       108개 가설은 전부 탈락했습니다.<br>
       "이후 20거래일 실적"은 홀드아웃 구간에서 그 밴드에 있던 섹터들의 실제
-      결과입니다. 예언이 아니라 과거 기록입니다.
+      결과입니다. 예언이 아니라 과거 기록입니다.<br>
+      구간 경계는 고정값이라 장 전체가 흔들리면 대부분 섹터가 '높음'에 몰립니다.
+      그럴 땐 밴드보다 <b>섹터 간 순서와 변동성 숫자</b>를 보세요.
     </div>
   `;
 }

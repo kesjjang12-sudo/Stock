@@ -1198,13 +1198,25 @@ function upsertSectorDaily_(sheet, byKey) {
    과거 백필 (1회성, 커서로 이어달리기)
    ============================================================ */
 
+/* GAS는 하루 UrlFetch 2만 건에서 예외를 던진다. 예전엔 이 예외를 다른 실패와
+   똑같이 null로 삼켜서, 요청이 전부 죽은 채로 "받았다"는 얼굴을 하고 있었다.
+   부분 데이터를 시트에 남기고 원인을 엉뚱한 데서 찾게 만든다. 한 번 걸리면
+   그 실행 내내 기억했다가 호출부가 즉시 접을 수 있게 한다. */
+let URLFETCH_QUOTA_HIT = false;
+
+function isQuotaError_(e) {
+  return String(e && e.message ? e.message : e).indexOf('too many times for one day') > -1;
+}
+
 function fetchAllChunked_(reqs) {
   const out = [];
   for (let i = 0; i < reqs.length; i += FETCH_CHUNK) {
     const part = reqs.slice(i, i + FETCH_CHUNK);
+    if (URLFETCH_QUOTA_HIT) { part.forEach(() => out.push(null)); continue; }
     try {
       UrlFetchApp.fetchAll(part).forEach((r) => out.push(r));
     } catch (e) {
+      if (isQuotaError_(e)) URLFETCH_QUOTA_HIT = true;
       part.forEach(() => out.push(null));
     }
     if (i + FETCH_CHUNK < reqs.length) Utilities.sleep(300);
@@ -2396,7 +2408,9 @@ function refreshCloses_(ss, uni, deadline) {
      남은 시간이 한 덩이를 넘길 것 같으면 끊고 다음 실행으로 넘긴다. */
   const pass = (codes, days) => {
     for (let i = 0; i < codes.length; i += CLOSES_SLICE) {
-      if (Date.now() + slowest * 1.3 > deadline) { pending += codes.length - i; return; }
+      if (URLFETCH_QUOTA_HIT || Date.now() + slowest * 1.3 > deadline) {
+        pending += codes.length - i; return;
+      }
       const t0 = Date.now();
       const part = codes.slice(i, i + CLOSES_SLICE);
       const got = fetchCloseSeries_(part, days);
@@ -2415,7 +2429,7 @@ function refreshCloses_(ss, uni, deadline) {
     if (s) rows.push(["'" + u.code, u.name, u.market, s.updated, encodeCloses_(s.arr)]);
   });
   writeRows_(sheet, rows);
-  return { store: store, pending: pending, fetched: fetched };
+  return { store: store, pending: pending, fetched: fetched, quota: URLFETCH_QUOTA_HIT };
 }
 
 /* 시세 API가 GAS에서 실제로 무엇을 돌려주는지 눈으로 본다.
@@ -2499,8 +2513,9 @@ function syncStockRisk() {
   });
 
   if (!rows.length) {
-    return { ok: false, pending: cl.pending, fetched: cl.fetched,
-      note: '아직 종가가 덜 모였습니다. 잠시 뒤 다시 실행하면 이어서 채웁니다.' };
+    return { ok: false, pending: cl.pending, fetched: cl.fetched, quotaExceeded: !!cl.quota,
+      note: cl.quota ? '오늘 쓸 수 있는 UrlFetch 2만 건을 다 썼습니다. 내일 08시 실행이 채웁니다.'
+        : '아직 종가가 덜 모였습니다. 잠시 뒤 다시 실행하면 이어서 채웁니다.' };
   }
 
   /* 같은 날 다시 돌면 그날 행을 갈아끼운다. 400종목이라 오래된 날짜는 잘라낸다. */
@@ -2541,10 +2556,13 @@ function syncStockRisk() {
   try { CacheService.getScriptCache().put('srver', Utilities.getUuid(), 21600); } catch (e) {}
 
   /* 처음 채우는 날은 한 번에 다 못 받는다. 남았으면 스스로 다시 깨운다. */
-  if (cl.pending > 0 && cl.fetched > 0) scheduleStockRiskResume_();
+  if (cl.pending > 0 && cl.fetched > 0 && !cl.quota) scheduleStockRiskResume_();
 
   return { ok: true, date: today, count: rows.length, universe: uni.length,
-    pending: cl.pending, fetched: cl.fetched, sectorRows: secCount };
+    pending: cl.pending, fetched: cl.fetched, sectorRows: secCount,
+    quotaExceeded: !!cl.quota,
+    note: cl.quota ? '오늘 쓸 수 있는 UrlFetch 2만 건을 다 썼습니다. 내일 08시 실행이 나머지를 채웁니다.'
+      : (cl.pending ? cl.pending + '종목이 남았습니다 — 곧 이어서 채웁니다.' : '') };
 }
 
 function scheduleStockRiskResume_() {

@@ -384,6 +384,21 @@ function renderFlowPage(el) {
   });
 }
 
+/* 외국인과 기관을 합쳐서 보여주면 부호가 반대일 때 서로 상쇄돼 0처럼 보인다.
+   실제로 검증에서도 둘의 방향이 갈리는 게 확인됐다 (기관 순매수는 이후 수익률과
+   음의 상관, 외국인은 양). 합계만 보면 그 정보가 통째로 사라진다.
+   그래서 합계 아래에 셋을 따로 적고, 외국인·기관이 엇갈릴 때는 표시한다. */
+function investorSplit(s) {
+  if (s.frgnFlow === undefined || s.orgFlow === undefined) return '';
+  const split = (s.frgnFlow > 0) !== (s.orgFlow > 0) && s.frgnFlow !== 0 && s.orgFlow !== 0;
+  const one = (label, v) =>
+    `<span class="inv-item"><span class="inv-k">${label}</span><span class="inv-v ${v >= 0 ? 'val-up' : 'val-down'}">${fmtFlow(v)}</span></span>`;
+  return `<div class="inv-split${split ? ' inv-split-diverge' : ''}">
+    ${one('외국인', s.frgnFlow)}${one('기관', s.orgFlow)}${one('개인', s.indiFlow)}
+    ${split ? '<span class="inv-tag">엇갈림</span>' : ''}
+  </div>`;
+}
+
 function sectorCardHtml(s) {
   const flowAvailable = hasFlowData(s);
   const priceView = marketFilter === 'us' || !flowAvailable;
@@ -410,6 +425,7 @@ function sectorCardHtml(s) {
     ? `<div class="sector-flow-amt ${avg >= 0 ? 'val-up' : 'val-down'}">${fmtPct(avg)}</div>
        <div class="sector-flow-sub">${s.stocks.length}종목 평균 등락률 · 실시간</div>`
     : `<div class="sector-flow-amt ${s.netFlow >= 0 ? 'val-up' : 'val-down'}">${fmtFlow(s.netFlow)}</div>
+       ${investorSplit(s)}
        <div class="sector-flow-sub">외국인·기관 순매매${s.flowDate ? ` · ${s.flowDate} 확정` : ''}</div>`;
 
   return `
@@ -1144,7 +1160,9 @@ function openSectorDetail(id) {
     </div>
     ${hasFlowData(s)
       ? `<span class="pill ${pillClass(s.netFlow)}">${fmtFlow(s.netFlow)} · 평소 대비 ${fmtPct(s.flowChangePct)}</span>
-         <div class="modal-note">수급은 ${s.flowDate || '—'} 확정치예요. 등락률은 실시간이라 기준일이 다릅니다.</div>`
+         ${investorSplit(s)}
+         <div class="modal-note">수급은 ${s.flowDate || '—'} 확정치예요. 등락률은 실시간이라 기준일이 다릅니다.<br>
+         외국인과 기관은 방향이 자주 갈립니다. 합계만 보면 상쇄돼 보이지 않아 따로 적었습니다.</div>`
       : `<span class="pill ${pillClass(avgChangeOf(s))}">평균 ${fmtPct(avgChangeOf(s))}</span>
          <div class="modal-note">${marketFilter === 'us'
            ? '미국 시장은 외국인·기관 순매매 공개 데이터가 없어 등락률·뉴스로만 봅니다.'

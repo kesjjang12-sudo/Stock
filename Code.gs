@@ -172,6 +172,7 @@ function doGet(e) {
     if (action === 'syncUniverse') return jsonOut_(syncUniverse());
     if (action === 'closes') return jsonOut_(closesReport_());
     if (action === 'probe') return jsonOut_(probeSise_(params.code || '005930'));
+    if (action === 'triggers') return jsonOut_(ensureDailyTriggers_());
     if (action === 'target') return jsonOut_(calculateTargetScore());
     if (action === 'rows') return jsonOut_(rawSectorDaily_(params.sector, params.from, params.to));
     if (action === 'backfill') {
@@ -305,18 +306,35 @@ function systemStatus_() {
   };
 }
 
+/* setup은 트리거를 다시 걸면서 refreshAll·syncEtfHoldings까지 곧바로 돌린다.
+   빠진 트리거 하나만 채우고 싶을 때 그걸 부르면 쓸데없이 요청을 태운다
+   (한도를 다 쓴 날엔 그 실행이 빈 데이터를 남길 수도 있다). 등록만 한다. */
+const DAILY_JOBS = [
+  { fn: 'backfillOutcomes', hour: 8 },
+  { fn: 'syncUsDaily', hour: 8 },
+  { fn: 'syncEtfHoldings', hour: 7 },
+  { fn: 'syncStockRisk', hour: 8 },
+];
+
+function ensureDailyTriggers_() {
+  const have = ScriptApp.getProjectTriggers().map((t) => t.getHandlerFunction());
+  const added = [];
+  DAILY_JOBS.forEach((j) => {
+    if (have.indexOf(j.fn) > -1) return;
+    ScriptApp.newTrigger(j.fn).timeBased().everyDays(1).atHour(j.hour).create();
+    added.push(j.fn + ' @' + j.hour + '시');
+  });
+  return { added: added,
+    triggers: ScriptApp.getProjectTriggers().map((t) => t.getHandlerFunction()) };
+}
+
 function setupTrigger() {
-  const managed = ['refreshAll', 'backfillOutcomes', 'syncUsDaily', 'syncEtfHoldings',
-    'syncUniverse', 'syncStockRisk'];
+  const managed = ['refreshAll'].concat(DAILY_JOBS.map((j) => j.fn));
   ScriptApp.getProjectTriggers().forEach((t) => {
     if (managed.indexOf(t.getHandlerFunction()) > -1) ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('refreshAll').timeBased().everyMinutes(REFRESH_INTERVAL_MIN).create();
-  ScriptApp.newTrigger('backfillOutcomes').timeBased().everyDays(1).atHour(8).create();
-  ScriptApp.newTrigger('syncUsDaily').timeBased().everyDays(1).atHour(8).create();
-  ScriptApp.newTrigger('syncEtfHoldings').timeBased().everyDays(1).atHour(7).create();
-  ScriptApp.newTrigger('syncUniverse').timeBased().everyDays(1).atHour(7).create();
-  ScriptApp.newTrigger('syncStockRisk').timeBased().everyDays(1).atHour(8).create();
+  ensureDailyTriggers_();
   syncEtfHoldings();
   refreshAll();
 }

@@ -1696,10 +1696,27 @@ function sectorRisk_(market) {
    탑다운 매수 관점 스코어 (섹터 국면 → 개별 종목)
    ============================================================ */
 
-/* 주의 — 이 점수의 예측력은 아직 검증되지 않았다.
-   같은 데이터로 돌린 수익률 예측 108개 가설은 홀드아웃에서 전멸했고,
-   여기 쓰이는 수급·모멘텀 계열 팩터도 그 안에 포함돼 있었다.
-   화면에 붙일 때는 반드시 그 사실을 함께 표시할 것. */
+/* 검증 결과 — 화면에 붙이지 않는다. action=target 으로만 열어둔다.
+
+   코스피 185종목 × 3.2년, T+1 진입, 학습 70% / 홀드아웃 30%로 검증했다.
+     이후 20일 수익률   홀드아웃 IC -0.001 (t -0.02)  → 기각
+     손익비(수익÷변동성) 홀드아웃 IC -0.004 (t -0.12)  → 기각
+     이후 20일 최대낙폭  홀드아웃 IC +0.120 (t +4.40)  → 통과하지만 방향이 반대다
+
+   즉 점수가 높을수록 이후 낙폭이 '더 컸다'. 상위 1/3이 하위 1/3보다 1.72%p 더 빠졌다.
+   다이버전스 항목이 dd60 >= 10% 를 필수 조건으로 걸어 이미 많이 빠진 섹터만 고르는데,
+   최근 낙폭은 이후 낙폭을 예측하는 강한 변수라서 그렇다.
+   '저가 매수' 필터로 의도했지만 실제로는 '계속 위험한 종목' 필터였다.
+
+   그럼 낙폭 경고로라도 쓸 수 있나 → 없다. 위험도 탭의 vol60이 같은 대상을
+   홀드아웃 IC +0.653으로 훨씬 세게 예측한다. vol60 설명분을 제거한 증분 IC는
+   +0.053 (t 2.12)로 경계선이고, vol60 3분위 안에서 갈라내는지 보면
+   홀드아웃에서 +0.06 / +0.29 / +0.37 %p (t 0.11 / 0.57 / 0.61)로 전부 무의미하다.
+   학습에서는 t 3.4~3.8이었다 — 홀드아웃에서 사라진 효과다.
+
+   재검증하려면 bt15.py(백테스트) / bt16.py(중복 검사)를 다시 돌릴 것.
+   가중치를 지금 손보는 건 권하지 않는다. 홀드아웃을 이미 열었으므로
+   결과를 보며 튜닝하면 그 순간 검증이 무의미해진다. 새 데이터가 쌓인 뒤에 하라. */
 
 /* 튜닝 지점은 전부 여기 모아둔다. 로직 본문에 숫자를 박지 않는다. */
 const TARGET_W = {
@@ -1717,7 +1734,10 @@ const TARGET_W = {
     flowNegDays: 12, flowNegCut: 25,             // 20일 중 12일 이상 순매도 + 누적 음수
   },
   smart: { scale: 0.35 },                        // 평균수급/수급표준편차 를 이 값으로 나눠 squash
-  resilience: { slopeFloor: -0.60, slopeCap: 0.80, ddBonus: 0.35 },  // 하루당 %
+  /* 기울기를 '하루당 %'로 재면 종목·국면마다 스케일이 달라 상한에 다 붙는다
+     (실제로 10종목 전부 100점이 나왔다). 그 종목의 일간 변동성으로 나눠
+     '변동성 몇 배로 오르는가'로 바꾸면 어디서든 같은 뜻이 된다. */
+  resilience: { slopeFloor: -0.50, slopeCap: 0.50, ddBonus: 0.35 },  // 일간 변동성 배수
 
   topSectors: 3,                                 // Phase 2를 적용할 상위 섹터 수
   pages: 9,                                      // 10거래일 × 9 = 90거래일이면 vol60까지 넉넉
@@ -1870,7 +1890,10 @@ function stockSelectionScore_(series, i) {
     : squash01_(smartRaw / W.smart.scale) * 100);
 
   const dd60 = ddFrom_(series.ret, i, 60);
-  const slope5 = slopePctPerDay_(series.close, i, 5);
+  const slopeRaw = slopePctPerDay_(series.close, i, 5);
+  // 일간 변동성 배수로 환산 (연율이 아니라 일간 표준편차로 나눈다)
+  const dayVol = stdev_(winFrom_(series.ret, i, 20));
+  const slope5 = (slopeRaw == null || !dayVol) ? null : slopeRaw / dayVol;
   const R = W.resilience;
   let resilience = 0;
   if (slope5 != null) {
@@ -1886,6 +1909,7 @@ function stockSelectionScore_(series, i) {
     smartRatio: isFinite(smartRaw) ? +smartRaw.toFixed(2) : (smartRaw > 0 ? 99 : -99), smart: clampScore_(smart),
     resilience: clampScore_(resilience),
     slope5: slope5 == null ? null : +slope5.toFixed(2),
+    slope5PctPerDay: slopeRaw == null ? null : +slopeRaw.toFixed(2),
     dd60: dd60 == null ? null : +dd60.toFixed(1),
     net20: Math.round(sum_(f20)), flowVol20: flowSd == null ? null : Math.round(flowSd),
   };
@@ -1987,7 +2011,13 @@ function calculateTargetScore(asOfIndex) {
     asOf: (hists[codes[0]] && hists[codes[0]][i]) ? hists[codes[0]][i].date : '',
     asOfIndex: i,
     validated: false,
-    caveat: '예측력이 검증되지 않은 점수입니다. 같은 데이터로 돌린 수익률 예측 108개 가설은 홀드아웃에서 전부 탈락했고, 여기 쓰인 수급·모멘텀 팩터도 그 안에 있었습니다.',
+    caveat: '검증에서 탈락한 점수입니다. 이후 20일 수익률 예측 IC -0.001, 손익비 -0.004로 예측력이 없고, 낙폭은 오히려 점수가 높을수록 컸습니다(상위 1/3이 하위 1/3보다 1.72%p 더 하락). 매수 판단에 쓰지 마세요.',
+    backtest: {
+      holdout: '2025-08-22 ~ 2026-08-07',
+      fwdReturnIC: -0.001, fwdSharpeIC: -0.004, fwdDrawdownIC: 0.120,
+      incrementalOverVol60: 0.053,
+      verdict: '수익률·손익비 기각. 낙폭은 역방향으로 유의하나 vol60 대비 증분이 없어 화면 미노출.',
+    },
     weights: TARGET_W,
     sectors: sectors,
     targets: targets,

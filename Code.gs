@@ -427,11 +427,17 @@ function fetchAllMarketData_(ss) {
 
 /* 코스피/코스닥 구분은 시세 응답에 딸려오므로 공짜다.
    백필은 시세를 안 받으므로 시트에 저장해두고 재사용한다. */
+/* 통째로 덮어쓰면 이번에 안 들어온 종목의 시장 구분이 사라진다
+   (섹터 갱신은 62종목, 유니버스는 400종목을 준다). 있는 것 위에 얹는다. */
 function saveMarketMap_(ss, map) {
   const codes = Object.keys(map);
   if (!codes.length) return;
   const sheet = getOrCreateSheet_(ss, 'StockMarket', ['itemCode', 'market']);
-  writeRows_(sheet, codes.map((c) => ["'" + c, map[c]]));
+  const merged = loadMarketMap_(ss);
+  let added = 0;
+  codes.forEach((c) => { if (merged[c] !== map[c]) { merged[c] = map[c]; added++; } });
+  if (!added) return;
+  writeRows_(sheet, Object.keys(merged).map((c) => ["'" + c, merged[c]]));
 }
 
 function loadMarketMap_(ss) {
@@ -1256,9 +1262,14 @@ function fetchTrendDeep_(code, pages) {
    커서는 종목마다 따로 들고 간다 (상장일이 달라 끝나는 시점이 다르다). */
 function fetchTrendDeepMulti_(codes, pages) {
   const state = {};
-  codes.forEach((c) => { state[c] = { seen: {}, hist: [], cursor: '', done: false }; });
+  codes.forEach((c) => { state[c] = { seen: {}, hist: [], cursor: '', done: false, miss: 0, got: 0 }; });
 
-  for (let p = 0; p < pages; p++) {
+  /* 응답이 비면 예전엔 그 종목을 바로 접었다. 62종목일 땐 안 보이던 문제가
+     400종목에서 드러났다 — 네이버가 가끔 한 건씩 흘리는데, 그때마다 이력이
+     중간에서 잘려 변동성을 못 낸다. 커서를 그대로 두고 다음 바퀴에 다시 묻는다.
+     그래서 여유 바퀴를 붙인다. */
+  const MISS_LIMIT = 3;
+  for (let p = 0; p < pages + MISS_LIMIT; p++) {
     const live = codes.filter((c) => !state[c].done);
     if (!live.length) break;
 
@@ -1270,10 +1281,11 @@ function fetchTrendDeepMulti_(codes, pages) {
 
     live.forEach((c, i) => {
       const st = state[c];
-      if (!res[i]) { st.done = true; return; }
+      const fail = () => { if (++st.miss >= MISS_LIMIT) st.done = true; };
+      if (!res[i]) { fail(); return; }
       let rows;
-      try { rows = parseTrendHistory_(res[i].getContentText()); } catch (e) { st.done = true; return; }
-      if (!rows.length) { st.done = true; return; }
+      try { rows = parseTrendHistory_(res[i].getContentText()); } catch (e) { fail(); return; }
+      if (!rows.length) { fail(); return; }
 
       let added = 0;
       rows.forEach((r) => {
@@ -1285,6 +1297,7 @@ function fetchTrendDeepMulti_(codes, pages) {
       if (!added) { st.done = true; return; }
 
       st.cursor = st.hist[st.hist.length - 1].date.replace(/-/g, '');
+      if (++st.got >= pages) st.done = true;   // 여유 바퀴는 실패 복구용이지 더 캐라는 뜻이 아니다
     });
   }
 

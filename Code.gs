@@ -2161,7 +2161,6 @@ const SECTOR_RISK_HEADERS = ['date', 'market', 'sectorId', 'name', 'icon', 'rank
   'vol60', 'vol20', 'band', 'rising', 'dd60', 'flowVol20', 'net20', 'indi20', 'buyDays', 'ret20'];
 
 
-const STOCK_RISK_PAGES = 7;        // 10거래일 × 7 = 70일이면 vol60에 충분
 const STOCK_RISK_BUDGET_MS = 3.6 * 60 * 1000;   // 뒤에 시트 쓰기·섹터 계산이 남아 6분보다 넉넉히 앞
 
 /* ---------- 유니버스: 시가총액 상위 종목 ---------- */
@@ -2286,15 +2285,61 @@ function loadUniverse_(ss) {
   return out;
 }
 
-/* ---------- 종가 보관: 매일 10일치만 받아 이어붙인다 ---------- */
+/* ---------- 종가 보관: 종목당 요청 한 번으로 받아 이어붙인다 ---------- */
 
-/* 400종목 × 7페이지를 매일 받으면 2,800번 왕복이라 6분 한도에 걸린다.
-   지난 종가는 변하지 않으므로 한 번 받아 보관하고, 이후로는 최근 한 장(10일)만
-   받아 앞에 붙인다. 하루 400번으로 줄어든다. */
+/* 수급 API(trend)는 한 번에 10거래일씩만 준다. 400종목 × 7페이지 = 2,800번 왕복이라
+   6분 한도에 걸릴 뿐 아니라, 실제로 돌려보니 종목당 3페이지쯤에서 네이버가 막았다
+   — 80종목이 정확히 30일치에서 멈췄고 재시도해도 같은 자리였다.
+
+   시세 API(siseJson)는 기간을 통째로 준다. 종목당 한 번이면 끝난다.
+   변동성 계산에는 종가만 있으면 되므로 수급 API를 쓸 이유가 없었다.
+   보관까지 해두니 매일은 최근 몇 주만 받아 앞에 붙이면 된다. */
 const CLOSES_HEADERS = ['code', 'name', 'market', 'updated', 'closes'];
 const CLOSES_KEEP = 90;
 const CLOSES_MIN = 61;             // vol60에 필요한 최소 종가 수
-const COLD_SLICE = 50;             // 한 번에 처음부터 채울 종목 수
+const CLOSES_SLICE = 100;          // 한 덩이로 묶어 보낼 종목 수
+const COLD_DAYS = 200;             // 처음 채울 때 (달력일 — 61거래일을 넉넉히 덮는다)
+const WARM_DAYS = 25;              // 매일 이어붙일 때
+
+function siseUrl_(code, days) {
+  const end = new Date();
+  const start = new Date(end.getTime() - days * 86400000);
+  const f = (d) => Utilities.formatDate(d, 'Asia/Seoul', 'yyyyMMdd');
+  return 'https://api.finance.naver.com/siseJson.naver?symbol=' + code
+    + '&requestType=1&startTime=' + f(start) + '&endTime=' + f(end) + '&timeframe=day';
+}
+
+/* 응답이 JSON이 아니라 자바스크립트 배열 리터럴이다 (헤더 줄은 작은따옴표).
+   ["20260810", 시가, 고가, 저가, 종가, 거래량, 외국인소진율] 에서 날짜와 종가만 뽑는다. */
+function parseSiseCloses_(text) {
+  const out = [];
+  const re = /\["(\d{8})"\s*,\s*[-\d.]+\s*,\s*[-\d.]+\s*,\s*[-\d.]+\s*,\s*([-\d.]+)/g;
+  let m;
+  while ((m = re.exec(String(text || '')))) {
+    const c = Number(m[2]);
+    if (c > 0) out.push({ d: m[1], c: c });
+  }
+  return out.sort((a, b) => (a.d < b.d ? 1 : -1));
+}
+
+/* 종목당 요청 한 번. 한꺼번에 몰지 않도록 나눠 던진다. */
+function fetchCloseSeries_(codes, days) {
+  const out = {};
+  for (let i = 0; i < codes.length; i += CLOSES_SLICE) {
+    const part = codes.slice(i, i + CLOSES_SLICE);
+    const res = fetchAllChunked_(part.map((c) => ({
+      url: siseUrl_(c, days), muteHttpExceptions: true,
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    })));
+    part.forEach((c, j) => {
+      if (!res[j]) return;
+      let rows;
+      try { rows = parseSiseCloses_(res[j].getContentText()); } catch (e) { return; }
+      if (rows.length) out[c] = rows;
+    });
+  }
+  return out;
+}
 
 function parseCloses_(s) {
   const out = [];
@@ -2312,12 +2357,10 @@ function encodeCloses_(arr) {
   return arr.slice(0, CLOSES_KEEP).map((x) => x.d + ':' + x.c).join(',');
 }
 
-function mergeCloses_(stored, hist) {
+function mergeCloses_(stored, fresh) {
   const map = {};
   (stored || []).forEach((x) => { map[x.d] = x.c; });
-  (hist || []).forEach((r) => {
-    if (r && r.date && r.closePrice) map[String(r.date).replace(/-/g, '')] = r.closePrice;
-  });
+  (fresh || []).forEach((x) => { if (x && x.d && x.c) map[x.d] = x.c; });
   return Object.keys(map).sort().reverse().map((d) => ({ d: d, c: map[d] })).slice(0, CLOSES_KEEP);
 }
 
@@ -2338,32 +2381,31 @@ function refreshCloses_(ss, uni, deadline) {
     else if (s.updated !== today) warm.push(u.code);
   });
 
-  const apply = (code, hist) => {
+  const apply = (code, fresh) => {
     const prev = store[code] ? store[code].arr : [];
-    const merged = mergeCloses_(prev, hist);
+    const merged = mergeCloses_(prev, fresh);
     if (merged.length) store[code] = { updated: today, arr: merged };
   };
 
   let fetched = 0;
-  if (warm.length) {
-    const h = fetchTrendDeepMulti_(warm, 1);
-    warm.forEach((c) => apply(c, h[c]));
-    fetched += warm.length;
-  }
-
-  /* 남은 시간을 고정값으로 재면 느린 날 한 덩이가 한도를 넘겨 실행이 통째로 죽는다.
-     실제로 걸린 가장 긴 덩이를 기준으로 삼는다 (백필과 같은 방식). */
   let pending = 0;
-  let slowest = 60000;
-  for (let i = 0; i < cold.length; i += COLD_SLICE) {
-    if (Date.now() + slowest * 1.3 > deadline) { pending = cold.length - i; break; }
-    const t0 = Date.now();
-    const part = cold.slice(i, i + COLD_SLICE);
-    const h = fetchTrendDeepMulti_(part, STOCK_RISK_PAGES);
-    part.forEach((c) => apply(c, h[c]));
-    fetched += part.length;
-    slowest = Math.max(slowest, Date.now() - t0);
-  }
+  let slowest = 30000;
+
+  /* 아직 못 채운 종목을 먼저 한다 — 확률표에 아예 못 올라간 종목이라 급하다.
+     남은 시간이 한 덩이를 넘길 것 같으면 끊고 다음 실행으로 넘긴다. */
+  const pass = (codes, days) => {
+    for (let i = 0; i < codes.length; i += CLOSES_SLICE) {
+      if (Date.now() + slowest * 1.3 > deadline) { pending += codes.length - i; return; }
+      const t0 = Date.now();
+      const part = codes.slice(i, i + CLOSES_SLICE);
+      const got = fetchCloseSeries_(part, days);
+      part.forEach((c) => apply(c, got[c]));
+      fetched += part.length;
+      slowest = Math.max(slowest, Date.now() - t0);
+    }
+  };
+  pass(cold, COLD_DAYS);
+  pass(warm, WARM_DAYS);
 
   /* 유니버스에서 빠진 종목은 들고 있어봐야 시트만 불린다 */
   const rows = [];

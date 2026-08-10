@@ -1587,6 +1587,7 @@ const RISK_BASIS = {
   icVol: 0.757, tVol: 12.3, icDd: 0.486, tDd: 6.0,
   note: '60일 실현변동성으로 섹터를 줄 세우면 이후 20거래일의 변동성·낙폭 순서가 대체로 유지된다',
 };
+const SECTOR_RISK_CAVEAT = '변동성·낙폭 예측입니다. 오를지 내릴지는 말하지 않습니다 — 수익률 예측은 검증에 실패했습니다.';
 const RISK_CACHE_SEC = 3 * 3600;
 const ANNUALIZE = Math.sqrt(252);
 
@@ -1616,8 +1617,49 @@ function riskBand_(vol60) {
   return '높음';
 }
 
+/* 시트에 저장된 게 있으면 그걸 쓴다. 7,600행을 매번 다시 접으면 화면이 오래 멈춘다.
+   하루 한 번 syncStockRisk가 종가 기준으로 계산해 넣어둔다. */
 function sectorRisk_(market) {
   market = ['kr', 'kospi', 'kosdaq'].indexOf(market) > -1 ? market : 'kr';
+  const stored = readSectorRisk_(market);
+  if (stored) return stored;
+  return computeSectorRisk_(market);
+}
+
+function readSectorRisk_(market) {
+  const cache = CacheService.getScriptCache();
+  let ver = '';
+  try { ver = cache.get('srver') || ''; } catch (e) {}
+  const ck = 'secr|' + ver + '|' + market;
+  try {
+    const hit = cache.get(ck);
+    if (hit) return JSON.parse(hit);
+  } catch (e) {}
+
+  const rows = getOrCreateSheet_(getDb_(), 'SectorRisk', SECTOR_RISK_HEADERS).getDataRange().getValues().slice(1);
+  let latest = '';
+  rows.forEach((r) => { const d = asDateStr_(r[0]); if (d > latest) latest = d; });
+  if (!latest) return null;
+
+  const out = [];
+  rows.forEach((r) => {
+    if (asDateStr_(r[0]) !== latest || String(r[1]) !== market) return;
+    out.push({
+      sectorId: String(r[2]), name: String(r[3]), icon: String(r[4]), rank: Number(r[5]),
+      vol60: Number(r[6]), vol20: Number(r[7]), band: String(r[8]), rising: r[9] === true || r[9] === 'TRUE',
+      dd60: Number(r[10]), flowVol20: Number(r[11]), net20: Number(r[12]),
+      indi20: Number(r[13]), buyDays: Number(r[14]), ret20: Number(r[15]),
+    });
+  });
+  if (!out.length) return null;
+  out.sort((a, b) => a.rank - b.rank);
+  const res = { market: market, asOf: latest, validated: true, cuts: RISK_CUTS, bands: RISK_BANDS,
+    basis: RISK_BASIS, caveat: SECTOR_RISK_CAVEAT, sectors: out, stored: true };
+  try { cache.put(ck, JSON.stringify(res), 6 * 3600); } catch (e) {}
+  return res;
+}
+
+function computeSectorRisk_(market) {
   const cache = CacheService.getScriptCache();
   const ck = 'risk|' + historyCacheVersion_() + '|' + market;
   try {
@@ -1688,7 +1730,7 @@ function sectorRisk_(market) {
     cuts: RISK_CUTS,
     bands: RISK_BANDS,
     basis: RISK_BASIS,
-    caveat: '변동성·낙폭 예측입니다. 오를지 내릴지는 말하지 않습니다 — 수익률 예측은 검증에 실패했습니다.',
+    caveat: SECTOR_RISK_CAVEAT,
     sectors: out,
   };
   try { cache.put(ck, JSON.stringify(res), RISK_CACHE_SEC); } catch (e) { /* 무시 */ }
@@ -2085,6 +2127,9 @@ const DD_BASIS = {
   basisIC: '60일 실현변동성 → 이후 낙폭, 홀드아웃 IC +0.632',
   note: '변동성 81% 위로는 더 쪼개도 갈리지 않는다 (86%/99%/143% 구간의 실제 하락률 55/54/62%). 8구간이 한계.',
 };
+const SECTOR_RISK_HEADERS = ['date', 'market', 'sectorId', 'name', 'icon', 'rank',
+  'vol60', 'vol20', 'band', 'rising', 'dd60', 'flowVol20', 'net20', 'indi20', 'buyDays', 'ret20'];
+
 const STOCK_RISK_PAGES = 7;   // 10거래일 × 7 = 70일이면 vol60에 충분
 
 
@@ -2154,8 +2199,32 @@ function syncStockRisk() {
   sheet.clear();
   sheet.getRange(1, 1, 1, W).setValues([STOCK_RISK_HEADERS]);
   sheet.getRange(2, 1, all.length, W).setValues(all);
+  // 섹터 위험도도 같은 시점에 계산해 저장한다 (화면이 매번 7,600행을 접지 않도록)
+  let secCount = 0;
+  try {
+    const srSheet = getOrCreateSheet_(ss, 'SectorRisk', SECTOR_RISK_HEADERS);
+    const SW = SECTOR_RISK_HEADERS.length;
+    const keep = srSheet.getDataRange().getValues().slice(1)
+      .filter((r) => asDateStr_(r[0]) !== today);
+    const add = [];
+    ['kr', 'kospi', 'kosdaq'].forEach((mk) => {
+      const r = computeSectorRisk_(mk);
+      (r.sectors || []).forEach((x) => {
+        add.push([today, mk, x.sectorId, x.name, x.icon, x.rank, x.vol60, x.vol20, x.band,
+          !!x.rising, x.dd60, x.flowVol20, x.net20, x.indi20, x.buyDays, x.ret20]);
+      });
+    });
+    const allSec = keep.concat(add);
+    if (allSec.length) {
+      srSheet.clear();
+      srSheet.getRange(1, 1, 1, SW).setValues([SECTOR_RISK_HEADERS]);
+      srSheet.getRange(2, 1, allSec.length, SW).setValues(allSec);
+      secCount = add.length;
+    }
+  } catch (e) { /* 섹터 저장 실패해도 종목 확률은 살린다 */ }
+
   try { CacheService.getScriptCache().put('srver', Utilities.getUuid(), 21600); } catch (e) {}
-  return { ok: true, date: today, count: rows.length };
+  return { ok: true, date: today, count: rows.length, sectorRows: secCount };
 }
 
 /* 화면용 — 시트에서 가장 최근 날짜만 읽어 즉시 돌려준다 (네트워크 요청 없음) */

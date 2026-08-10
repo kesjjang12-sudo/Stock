@@ -37,148 +37,18 @@ function isConfigured() {
 }
 
 /* ============================================================
-   샘플(mock) 데이터 — 연결 전/실패 시 폴백으로 사용
-   ============================================================ */
-
-const MOCK_FLOW_DATE = '2026-08-04';
-
-const MOCK_SECTORS = [
-  {
-    id: 'bigtech', name: '빅테크', icon: '💻',
-    netFlow: 0, flowChangePct: 0, flowDate: '',
-    newsVolume: 128, newsKr: 6, newsUs: 122, newsChangePct: 14, newsBaselineReady: true,
-    stocks: [
-      { ticker: 'AAPL', name: '애플', market: 'US', changePct: 1.2, flow: null },
-      { ticker: 'MSFT', name: '마이크로소프트', market: 'US', changePct: 0.8, flow: null },
-      { ticker: 'GOOGL', name: '알파벳', market: 'US', changePct: -0.4, flow: null },
-      { ticker: 'AMZN', name: '아마존', market: 'US', changePct: 2.1, flow: null },
-      { ticker: 'META', name: '메타', market: 'US', changePct: 1.6, flow: null },
-    ],
-  },
-  {
-    id: 'semi', name: '반도체', icon: '🔧',
-    netFlow: -860, flowChangePct: -62.4, flowDate: MOCK_FLOW_DATE,
-    newsVolume: 96, newsKr: 22, newsUs: 74, newsChangePct: 41, newsBaselineReady: true,
-    stocks: [
-      { ticker: 'NVDA', name: '엔비디아', market: 'US', changePct: -2.8, flow: null },
-      { ticker: '005930', name: '삼성전자', market: 'KR', changePct: -1.1, flow: -180 },
-      { ticker: '000660', name: 'SK하이닉스', market: 'KR', changePct: -1.9, flow: -210 },
-      { ticker: 'TSM', name: 'TSMC', market: 'US', changePct: -0.6, flow: null },
-      { ticker: 'AMD', name: 'AMD', market: 'US', changePct: -1.3, flow: null },
-    ],
-  },
-  {
-    id: 'software', name: '소프트웨어', icon: '🖥️',
-    netFlow: 410, flowChangePct: 38.5, flowDate: MOCK_FLOW_DATE,
-    newsVolume: 54, newsKr: 18, newsUs: 36, newsChangePct: 6, newsBaselineReady: true,
-    stocks: [
-      { ticker: 'CRM', name: '세일즈포스', market: 'US', changePct: 0.9, flow: null },
-      { ticker: 'ORCL', name: '오라클', market: 'US', changePct: 1.1, flow: null },
-      { ticker: '035420', name: '네이버', market: 'KR', changePct: 0.5, flow: 60 },
-      { ticker: '035720', name: '카카오', market: 'KR', changePct: -0.8, flow: -40 },
-      { ticker: 'ADBE', name: '어도비', market: 'US', changePct: 1.4, flow: null },
-    ],
-  },
-  {
-    id: 'finance', name: '금융', icon: '🏦',
-    netFlow: 300, flowChangePct: 71.2, flowDate: MOCK_FLOW_DATE,
-    newsVolume: 38, newsKr: 14, newsUs: 24, newsChangePct: -12, newsBaselineReady: true,
-    stocks: [
-      { ticker: 'JPM', name: 'JP모건', market: 'US', changePct: 0.4, flow: null },
-      { ticker: '105560', name: 'KB금융', market: 'KR', changePct: 0.6, flow: 80 },
-      { ticker: '055550', name: '신한지주', market: 'KR', changePct: 0.3, flow: 40 },
-      { ticker: '086790', name: '하나금융지주', market: 'KR', changePct: 0.2, flow: 30 },
-      { ticker: 'BAC', name: '뱅크오브아메리카', market: 'US', changePct: 0.5, flow: null },
-    ],
-  },
-  {
-    id: 'battery', name: '2차전지·에너지', icon: '🔋',
-    netFlow: -520, flowChangePct: -45.8, flowDate: MOCK_FLOW_DATE,
-    newsVolume: 71, newsKr: 26, newsUs: 45, newsChangePct: 22, newsBaselineReady: true,
-    stocks: [
-      { ticker: 'TSLA', name: '테슬라', market: 'US', changePct: -2.2, flow: null },
-      { ticker: '373220', name: 'LG에너지솔루션', market: 'KR', changePct: -1.7, flow: -160 },
-      { ticker: '006400', name: '삼성SDI', market: 'KR', changePct: -1.5, flow: -90 },
-      { ticker: 'ENPH', name: '엔페이즈', market: 'US', changePct: -3.1, flow: null },
-    ],
-  },
-  {
-    id: 'health', name: '헬스케어·바이오', icon: '🧬',
-    netFlow: 260, flowChangePct: 24.6, flowDate: MOCK_FLOW_DATE,
-    newsVolume: 29, newsKr: 9, newsUs: 20, newsChangePct: 3, newsBaselineReady: true,
-    stocks: [
-      { ticker: 'LLY', name: '일라이릴리', market: 'US', changePct: 1.3, flow: null },
-      { ticker: '207940', name: '삼성바이오로직스', market: 'KR', changePct: 0.7, flow: 70 },
-      { ticker: '068270', name: '셀트리온', market: 'KR', changePct: -0.3, flow: -20 },
-      { ticker: 'UNH', name: '유나이티드헬스', market: 'US', changePct: 0.9, flow: null },
-    ],
-  },
-];
-
-const MOCK_EVENTS = [
-  {
-    date: '2026-07-18', sector: '반도체', changePct: -4.1,
-    headline: 'AI 반도체 수출규제 우려 확산, 필라델피아 반도체지수 급락',
-    tags: ['규제 우려', '반도체'],
-    outcome: { days: 20, pct: 9.6, positive: true },
-  },
-  {
-    date: '2026-05-06', sector: '2차전지·에너지', changePct: -3.5,
-    headline: '전기차 수요 둔화 지표 발표, 배터리 밸류체인 동반 하락',
-    tags: ['수요 둔화', '실적 우려'],
-    outcome: { days: 20, pct: 6.1, positive: true },
-  },
-  {
-    date: '2026-03-10', sector: '빅테크', changePct: -3.0,
-    headline: '미 국채금리 급등, 밸류에이션 부담에 성장주 매도',
-    tags: ['금리', '밸류에이션'],
-    outcome: { days: 20, pct: 11.4, positive: true },
-  },
-  {
-    date: '2026-01-22', sector: '금융', changePct: -2.6,
-    headline: '지역은행 부실채권 우려 재부각, 금융주 전반 약세',
-    tags: ['신용 우려'],
-    outcome: { days: 20, pct: -1.8, positive: false },
-  },
-  {
-    date: '2025-11-03', sector: '소프트웨어', changePct: -3.3,
-    headline: '클라우드 대기업 실적 가이던스 하향, 소프트웨어 섹터 조정',
-    tags: ['실적 쇼크'],
-    outcome: { days: 20, pct: 7.2, positive: true },
-  },
-  {
-    date: '2025-09-15', sector: '반도체', changePct: -3.4,
-    headline: '미 상무부 반도체 수출 통제 강화 발표',
-    tags: ['규제', '지정학'],
-    outcome: { days: 20, pct: 8.2, positive: true },
-  },
-];
-
-/* ============================================================
    상태
    ============================================================ */
 
-const MOCK_ALERTS = [
-  { id: 'm1', date: '2026-08-05', sectorId: 'semi', sectorName: '반도체', type: 'signal',
-    at: new Date(Date.now() - 12 * 60000).toISOString(),
-    body: '⚠️ [반도체] 선제 신호 -103.4%p\n자금 -62.4% / 뉴스 +41% (평소 대비)\n수급 기준일 2026-08-04' },
-  { id: 'm2', date: '2026-08-05', sectorId: 'finance', sectorName: '금융', type: 'signal',
-    at: new Date(Date.now() - 96 * 60000).toISOString(),
-    body: '📈 [금융] 선제 신호 +83.2%p\n자금 +71.2% / 뉴스 -12% (평소 대비)\n수급 기준일 2026-08-04' },
-  { id: 'm3', date: '2026-08-04', sectorId: 'battery', sectorName: '2차전지·에너지', type: 'drop',
-    at: new Date(Date.now() - 26 * 3600000).toISOString(),
-    body: '📉 [2차전지·에너지] -2.9% 하락\n자금 평소 대비 -45.8%\n전기차 보조금 축소 논의 재점화' },
-];
-
 const SEEN_KEY = 'stock_seen_alerts';
 
-let SECTORS = MOCK_SECTORS;
-let EVENTS = MOCK_EVENTS;
-let ALERTS = MOCK_ALERTS;
+let SECTORS = [];
+let EVENTS = [];
+let ALERTS = [];
 let newsEnabled = true;
 let currentPage = 'flow';
 let sortMode = 'flow'; // flow | change | news
-let connStatus = 'demo'; // demo | live | error | loading
+let connStatus = 'loading'; // loading | live | error | off
 let lastUpdated = new Date();
 let flashIds = new Set();
 
@@ -198,7 +68,7 @@ let trendFrom = '';
 let trendTo = '';
 let TREND = null;
 let trendState = 'idle'; // idle | loading | ready | error
-const trendCache = {};
+let trendCache = {};
 
 const PERIOD_LABEL = { day: '일별', month: '월별', year: '연도별' };
 const METRIC_LABEL = { flow: '수급', price: '등락률', news: '뉴스' };
@@ -461,13 +331,13 @@ function renderStatusBanner() {
     el.innerHTML = `<span class="demo-banner-badge badge-live">LIVE</span><span class="demo-banner-text">네이버 연동 데이터 표시 중이에요.</span>`;
   } else if (connStatus === 'error') {
     el.className = 'demo-banner status-error';
-    el.innerHTML = `<span class="demo-banner-badge badge-error">오류</span><span class="demo-banner-text">서버 연결에 실패해서 마지막으로 받은 데이터(또는 샘플)를 보여주고 있어요. <button class="banner-link" id="openSettingsFromBanner">설정 확인</button></span>`;
+    el.innerHTML = `<span class="demo-banner-badge badge-error">오류</span><span class="demo-banner-text">서버 연결에 실패했어요. 아래는 <b>마지막으로 받은 실데이터</b>이며 지금 시점이 아닙니다. <button class="banner-link" id="openSettingsFromBanner">설정 확인</button></span>`;
   } else if (connStatus === 'loading') {
     el.className = 'demo-banner status-loading';
     el.innerHTML = `<span class="demo-banner-badge">연결중</span><span class="demo-banner-text">데이터를 불러오는 중이에요…</span>`;
   } else {
     el.className = 'demo-banner';
-    el.innerHTML = `<span class="demo-banner-badge">DEMO</span><span class="demo-banner-text">지금은 <b>샘플 데이터</b>예요. ⚙️ 설정에서 GAS 웹앱 URL을 연결하면 실시간 데이터로 바뀝니다.</span>`;
+    el.innerHTML = `<span class="demo-banner-badge">연결 안 됨</span><span class="demo-banner-text">⚙️ 설정에서 GAS 웹앱을 연결하면 데이터가 표시됩니다. <b>표시되는 숫자는 모두 실데이터이며 샘플은 없습니다.</b></span>`;
   }
   const link = document.getElementById('openSettingsFromBanner');
   if (link) link.addEventListener('click', openSettingsModal);
@@ -494,9 +364,12 @@ function renderFlowPage(el) {
       </div>
     </div>
     ${usNote}
-    <div class="sector-grid">
-      ${list.map(sectorCardHtml).join('')}
-    </div>
+    ${list.length
+      ? `<div class="sector-grid">${list.map(sectorCardHtml).join('')}</div>`
+      : `<div class="empty-state"><div class="empty-icon">${connStatus === 'loading' ? '⏳' : '📭'}</div>${
+          connStatus === 'loading' ? '데이터를 불러오는 중이에요…'
+          : connStatus === 'off' ? 'GAS를 연결하면 데이터가 표시됩니다.'
+          : '표시할 데이터가 없어요. 잠시 후 다시 시도해주세요.'}</div>`}
   `;
   el.querySelectorAll('.sort-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1005,7 +878,7 @@ function openSectorDetail(id) {
         `).join('')}
       </tbody>
     </table>
-    <div class="section-title" style="margin-top:20px;">관련 뉴스${connStatus === 'live' ? '' : ' (샘플)'}</div>
+    <div class="section-title" style="margin-top:20px;">관련 뉴스</div>
     <div class="news-list">${sectorNewsHtml(s)}</div>
   `;
   document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
@@ -1016,16 +889,11 @@ function closeModal() {
   document.getElementById('modalOverlay').classList.remove('open');
 }
 
-/* 실데이터가 있으면 출처·링크가 붙은 실제 기사를, 없으면 샘플을 보여준다.
-   집계에 쓰인 기사와 같은 목록이라 숫자와 화면이 어긋나지 않는다. */
+/* 집계에 쓰인 기사와 같은 목록이라 화면의 건수와 기사 목록이 어긋나지 않는다 */
 function sectorNewsHtml(s) {
   const items = (s.newsItems || []).filter((n) => n && n.title);
   if (!items.length) {
-    return mockNewsFor(s).map((n) => `
-      <div class="news-item">
-        <div class="news-item-title">${n.title}</div>
-        <div class="news-item-meta">${n.source} · ${n.time}</div>
-      </div>`).join('');
+    return `<div class="news-filtered">최근 24시간 안에 증시와 관련된 기사가 없어요.</div>`;
   }
   const filtered = s.newsRaw && s.newsRaw > s.newsVolume
     ? `<div class="news-filtered">증시와 무관하거나 중복인 기사 ${s.newsRaw - s.newsVolume}건은 집계에서 뺐어요.</div>`
@@ -1045,14 +913,6 @@ function newsAgo(pubDate) {
   if (m < 60) return `${m}분 전`;
   if (m < 1440) return `${Math.floor(m / 60)}시간 전`;
   return `${Math.floor(m / 1440)}일 전`;
-}
-
-function mockNewsFor(s) {
-  return [
-    { title: `${s.name} 섹터, 외국인 순매수 전환 조짐`, source: '샘플뉴스', time: '32분 전' },
-    { title: `${s.stocks[0].name}, 실적 기대감에 강세`, source: '샘플뉴스', time: '1시간 전' },
-    { title: `${s.name} 관련 종목 수급 동향 정리`, source: '샘플뉴스', time: '3시간 전' },
-  ];
 }
 
 /* ============================================================
@@ -1077,7 +937,7 @@ function openSettingsModal() {
       <input type="text" class="form-control" id="cfgKey" placeholder="Code.gs의 SECRET_KEY 값" value="${c.key}">
     </div>
     <div class="settings-actions">
-      <button class="btn btn-ghost" id="cfgClearBtn">연결 해제 (샘플로)</button>
+      <button class="btn btn-ghost" id="cfgClearBtn">연결 해제</button>
       <button class="btn btn-primary" id="cfgSaveBtn">저장하고 연결 테스트</button>
     </div>
     <div id="cfgTestResult" class="settings-result"></div>
@@ -1122,9 +982,10 @@ function openSettingsModal() {
   renderKakaoSection();
   document.getElementById('cfgClearBtn').addEventListener('click', () => {
     clearConfig();
-    connStatus = 'demo';
-    SECTORS = MOCK_SECTORS;
-    EVENTS = MOCK_EVENTS;
+    connStatus = 'off';
+    SECTORS = [];
+    EVENTS = [];
+    ALERTS = [];
     localStorage.removeItem(CACHE_KEY);
     closeModal();
     render();
@@ -1150,7 +1011,7 @@ async function onSaveConfig() {
     resultEl.className = 'settings-result ok';
     setTimeout(closeModal, 900);
   } else {
-    resultEl.textContent = '❌ 연결에 실패했어요. URL/키를 확인해주세요. (샘플 데이터 유지)';
+    resultEl.textContent = '❌ 연결에 실패했어요. URL/키를 확인해주세요.';
     resultEl.className = 'settings-result err';
   }
   render();
@@ -1315,25 +1176,8 @@ function applyFlash() {
 }
 
 /* ============================================================
-   새로고침 (연결 안 됐을 때는 데모용으로 숫자만 살짝 흔듦)
+   새로고침
    ============================================================ */
-
-function jitterData() {
-  SECTORS = SECTORS.map((s) => {
-    const flowAvailable = hasFlowData(s);
-    return {
-      ...s,
-      netFlow: flowAvailable ? s.netFlow + Math.round((Math.random() - 0.5) * 80) : 0,
-      flowChangePct: flowAvailable ? +(s.flowChangePct + (Math.random() - 0.5) * 12).toFixed(1) : 0,
-      newsChangePct: +(s.newsChangePct + (Math.random() - 0.5) * 8).toFixed(1),
-      stocks: s.stocks.map((st) => ({
-        ...st,
-        changePct: +(st.changePct + (Math.random() - 0.5) * 0.4).toFixed(1),
-        flow: st.flow == null ? null : st.flow + Math.round((Math.random() - 0.5) * 20),
-      })),
-    };
-  });
-}
 
 async function doRefresh() {
   const btn = document.getElementById('refreshBtn');
@@ -1342,9 +1186,8 @@ async function doRefresh() {
 
   if (isConfigured()) {
     await fetchDashboard();
-  } else {
-    jitterData();
-    lastUpdated = new Date();
+    trendCache = {};
+    if (currentPage === 'trend') await fetchTrend(render);
   }
   render();
 }
@@ -1391,8 +1234,9 @@ function init() {
   if (cached && isConfigured()) {
     try {
       const parsed = JSON.parse(cached);
-      SECTORS = parsed.sectors;
-      EVENTS = parsed.events;
+      SECTORS = parsed.sectors || [];
+      EVENTS = parsed.events || [];
+      ALERTS = parsed.alerts || [];
       connStatus = 'live';
     } catch (e) { /* 무시 */ }
   }

@@ -491,6 +491,13 @@ function srLoss(s, horizon, thrIdx) {
   return t ? t[horizon][thrIdx] : 0;
 }
 
+/* 네이버가 주는 시가총액 단위는 억원이다 (삼성전자 13,446,441 = 1,344조) */
+function fmtCap(v) {
+  const jo = v / 10000;
+  return jo >= 1 ? jo.toLocaleString('en-US', { maximumFractionDigits: jo >= 100 ? 0 : 1 }) + '조'
+    : Math.round(v).toLocaleString('en-US') + '억';
+}
+
 /* 400종목을 한 화면에 쏟으면 못 읽는다. 찾기·거르기·정렬을 붙이고
    기본은 위험한 순으로 60종목만 보여준다. */
 const srFilter = { q: '', market: 'all', industry: 'all', band: 'all', sort: 'vol', limit: 60 };
@@ -507,7 +514,7 @@ function srMatches() {
   const by = {
     vol: (a, b) => b.vol60 - a.vol60,
     volAsc: (a, b) => a.vol60 - b.vol60,
-    cap: (a, b) => (a.market === b.market ? a.rank - b.rank : a.market < b.market ? -1 : 1),
+    cap: (a, b) => b.cap - a.cap,
     dd: (a, b) => b.dd60 - a.dd60,
     heat: (a, b) => (b.vol20 - b.vol60) - (a.vol20 - a.vol60),
   };
@@ -523,7 +530,7 @@ function srBodyHtml() {
     const heat = s.vol20 - s.vol60;
     return `
     <tr>
-      <td><b>${s.name}</b><div class="exp-sub">${s.market} ${s.rank}위${s.industry ? ' · ' + s.industry : ''}</div></td>
+      <td><b>${s.name}</b><div class="exp-sub">${s.market} ${s.rank}위${s.cap ? ' · ' + fmtCap(s.cap) : ''}${s.industry ? ' · ' + s.industry : ''}</div></td>
       <td class="num">${s.vol60}%<div class="exp-sub">20일 ${s.vol20}%${heat >= 10 ? ' ↑' : heat <= -10 ? ' ↓' : ''}</div></td>
       <td><span class="band-chip ${SR_BAND_CLASS[s.bandIdx] || 'band-mid'}">${s.band}</span></td>
       ${probCell(srStop(s, 10, 1))}

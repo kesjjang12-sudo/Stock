@@ -170,6 +170,7 @@ function doGet(e) {
     if (action === 'stockrisk') return jsonOut_(stockRisk_());
     if (action === 'syncStockRisk') return jsonOut_(syncStockRisk());
     if (action === 'syncUniverse') return jsonOut_(syncUniverse());
+    if (action === 'closes') return jsonOut_(closesReport_());
     if (action === 'target') return jsonOut_(calculateTargetScore());
     if (action === 'rows') return jsonOut_(rawSectorDaily_(params.sector, params.from, params.to));
     if (action === 'backfill') {
@@ -2115,8 +2116,8 @@ function calculateTargetScore(asOfIndex) {
 
    확률은 밴드만 알면 표에서 나오므로 시트에도 응답에도 밴드까지만 담는다
    (400종목 × 확률 13칸을 매일 쓰면 시트가 금방 불어난다). */
-const STOCK_RISK_HEADERS = ['date', 'code', 'name', 'market', 'rank', 'sectorId', 'industry',
-  'vol20', 'vol60', 'band', 'bandIdx', 'dd60'];
+const STOCK_RISK_HEADERS = ['date', 'code', 'name', 'market', 'rank', 'marketValue',
+  'sectorId', 'industry', 'vol20', 'vol60', 'band', 'bandIdx', 'dd60'];
 const STOCK_RISK_KEEP_DAYS = 60;   // 시트에 남길 날짜 수
 
 /* 하락을 어떻게 정의하느냐로 숫자가 세 배 갈린다. 20일 7% 기준 8구간에서
@@ -2279,7 +2280,8 @@ function loadUniverse_(ss) {
     const c = padKrCode_(r[0]);
     if (!c) return;
     out.push({ code: c, name: String(r[1] || ''), market: String(r[2] || 'KOSPI'),
-      rank: Number(r[3]) || 0, industry: String(r[6] || ''), sectorId: String(r[7] || '') });
+      rank: Number(r[3]) || 0, marketValue: Number(r[4]) || 0,
+      industry: String(r[6] || ''), sectorId: String(r[7] || '') });
   });
   return out;
 }
@@ -2373,6 +2375,27 @@ function refreshCloses_(ss, uni, deadline) {
   return { store: store, pending: pending, fetched: fetched };
 }
 
+/* 어떤 종목이 왜 확률표에 안 나오는지 보려면 보관된 종가 개수를 봐야 한다.
+   시트를 직접 열지 않고 확인할 수 있게 열어둔다. */
+function closesReport_() {
+  const ss = getDb_();
+  const rows = resetSheetIfSchemaChanged_(ss, 'StockCloses', CLOSES_HEADERS)
+    .getDataRange().getValues().slice(1);
+  const hist = {};
+  const short = [];
+  rows.forEach((r) => {
+    const n = parseCloses_(r[4]).length;
+    const bucket = n === 0 ? '0' : n < 20 ? '1-19' : n < 40 ? '20-39' : n < 61 ? '40-60' : '61+';
+    hist[bucket] = (hist[bucket] || 0) + 1;
+    if (n < CLOSES_MIN && short.length < 25) {
+      short.push({ code: padKrCode_(r[0]), name: String(r[1]), n: n,
+        updated: asDateStr_(r[3]), head: String(r[4]).slice(0, 40) });
+    }
+  });
+  return { stored: rows.length, universe: loadUniverse_(ss).length,
+    need: CLOSES_MIN, histogram: hist, shortExamples: short };
+}
+
 /* 최신일 우선 종가 배열에서 일간 등락률을 뽑는다 */
 function closeReturns_(arr) {
   const out = [];
@@ -2416,7 +2439,7 @@ function syncStockRisk() {
     const b = volBandIndex_(vol60);
     // 낙폭은 과거→최근 순으로 곱해야 하므로 뒤집는다
     const dd60 = +maxDrawdown_(rets.slice(0, 60).reverse()).toFixed(1);
-    rows.push([today, "'" + u.code, u.name, u.market, u.rank, u.sectorId, u.industry,
+    rows.push([today, "'" + u.code, u.name, u.market, u.rank, u.marketValue, u.sectorId, u.industry,
       vol20, vol60, VOL_BANDS[b], b, dd60]);
   });
 
@@ -2520,9 +2543,9 @@ function stockRisk_() {
     if (asDateStr_(r[0]) !== latest) return;
     out.push({
       code: padKrCode_(r[1]), name: String(r[2]), market: String(r[3]), rank: Number(r[4]) || 0,
-      sectorId: String(r[5] || ''), industry: String(r[6] || ''),
-      vol20: Number(r[7]), vol60: Number(r[8]), band: String(r[9]),
-      bandIdx: Number(r[10]), dd60: Number(r[11]),
+      cap: Number(r[5]) || 0, sectorId: String(r[6] || ''), industry: String(r[7] || ''),
+      vol20: Number(r[8]), vol60: Number(r[9]), band: String(r[10]),
+      bandIdx: Number(r[11]), dd60: Number(r[12]),
     });
   });
   out.sort((a, b) => b.vol60 - a.vol60);

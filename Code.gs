@@ -169,7 +169,7 @@ function doGet(e) {
     if (action === 'score') return jsonOut_(sectorScores_(params.market));
     if (action === 'rows') return jsonOut_(rawSectorDaily_(params.sector, params.from, params.to));
     if (action === 'backfill') {
-      const r = backfillSectorDaily_(4.5 * 60 * 1000);
+      const r = backfillSectorDaily_(4.5 * 60 * 1000, params.reset === '1', params.sector);
       return htmlOut_(r.finished ? '백필 완료' : '백필 진행 중',
         r.log.join('<br>') + '<br><br>' + r.done + ' / ' + r.total + ' 섹터' +
         (r.finished ? '<br><br>끝났습니다. 대시보드 추이 탭을 확인하세요.' : '<br><br>아직 남았습니다. 이 페이지를 <b>새로고침</b>하면 이어서 진행합니다.'));
@@ -1276,13 +1276,13 @@ function backfillSector_(sec, krStocks, marketOf) {
 
 /* 섹터 단위로 끊어서 처리하고 커서를 저장한다. 한 번에 다 못 끝내면
    같은 주소를 다시 열어 이어서 진행하면 된다. */
-function backfillSectorDaily_(maxMs) {
+function backfillSectorDaily_(maxMs, reset, onlyId) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(60000)) return { finished: false, done: 0, total: SECTOR_CONFIG.length, log: ['다른 작업이 시트를 쓰고 있어 건너뜁니다. 잠시 후 다시 열어주세요.'] };
-  try { return backfillSectorDailyInner_(maxMs); } finally { lock.releaseLock(); }
+  try { return backfillSectorDailyInner_(maxMs, reset, onlyId); } finally { lock.releaseLock(); }
 }
 
-function backfillSectorDailyInner_(maxMs) {
+function backfillSectorDailyInner_(maxMs, reset, onlyId) {
   const props = PropertiesService.getScriptProperties();
   const ss = getDb_();
   const sheet = getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS);
@@ -1292,8 +1292,27 @@ function backfillSectorDailyInner_(maxMs) {
   const active = activeKrStocks_(ss);
   const marketOf = loadMarketMap_(ss);
 
-  let cursor = parseInt(props.getProperty('BACKFILL_CURSOR') || '0', 10);
+  /* 섹터 하나만 지목해서 고칠 수 있게 열어둔다. 전체 패스는 4.5분씩 걸리고
+     10분마다 도는 refreshAll과 스크립트 락을 다투다 중간에 밀리는데,
+     그때 특정 섹터만 상한 걸 알고 있으면 한 번에 복구할 수 있다. */
+  if (onlyId) {
+    const sec = SECTOR_CONFIG.filter((s) => s.id === onlyId)[0];
+    if (!sec) return { finished: true, done: 0, total: 0, log: ['알 수 없는 섹터: ' + onlyId] };
+    const byKey = backfillSector_(sec, active[sec.id] || [], marketOf);
+    upsertSectorDaily_(sheet, byKey);
+    sortSectorDaily_(sheet);
+    invalidateHistoryCache_();
+    return { finished: true, done: 1, total: 1,
+      log: ['✅ ' + sec.name + ' — ' + Object.keys(byKey).length + '행 (' + (active[sec.id] || []).length + '종목)'] };
+  }
+
+  /* 커서는 완주했을 때만 지워진다. 중간에 죽으면 남은 커서 때문에 다음 실행이
+     앞쪽 섹터를 통째로 건너뛰고, 그 섹터의 과거 행은 옛 데이터인 채로 남는다.
+     실제로 금융~뷰티(3~6번) 구간이 이렇게 갱신되지 않았다. 시작 위치를 로그에
+     찍고, reset=1로 처음부터 다시 돌릴 수 있게 한다. */
+  let cursor = reset ? 0 : parseInt(props.getProperty('BACKFILL_CURSOR') || '0', 10);
   if (!(cursor >= 0)) cursor = 0;
+  if (cursor > 0) log.push('↪︎ ' + cursor + '번 섹터부터 이어서 진행 (처음부터 하려면 &reset=1)');
 
   while (cursor < SECTOR_CONFIG.length && Date.now() - started < maxMs) {
     const sec = SECTOR_CONFIG[cursor];

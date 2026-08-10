@@ -338,7 +338,6 @@ function refreshAll() {
 
   logDailySectorPct_(ss, results);
   logSectorDailyFromQuotes_(ss, quotes);
-  invalidateHistoryCache_();
   detectDropEvents_(ss, results);
   checkAlerts_(ss, results, quotes);
 }
@@ -387,14 +386,8 @@ function fetchAllMarketData_(ss) {
     } catch (e) { /* 배치 하나 실패는 나머지를 살린다 */ }
   });
 
-  // 2) 국내 수급 — 종목당 1요청 (전일 확정치라 최근 10거래일이면 충분)
-  const trendReqs = codes.map((c) => ({
-    url: trendUrl_(c, ''), muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' },
-  }));
-  fetchAllChunked_(trendReqs).forEach((res, i) => {
-    if (!res) return;
-    try { out.krTrend[codes[i]] = parseTrendHistory_(res.getContentText()); } catch (e) { /* 무시 */ }
-  });
+  // 2) 국내 수급 — 전일 확정치라 장중에 바뀌지 않는다. 캐시해서 하루 몇 번만 실제로 받는다.
+  out.krTrend = fetchKrTrends_(codes);
 
   // 3) 미국 시세 — 배치 엔드포인트가 없어 종목당 1요청
   const usReqs = [];
@@ -429,6 +422,50 @@ function loadMarketMap_(ss) {
   sheet.getDataRange().getValues().slice(1).forEach((r) => {
     if (r[0]) out[padKrCode_(r[0])] = String(r[1] || 'KOSPI');
   });
+  return out;
+}
+
+/* 수급은 당일 장 마감 후에야 갱신된다. 10분마다 62종목을 다시 받으면
+   무료 실행시간(90분/일)과 UrlFetch 한도(2만건/일)를 금방 태운다. */
+const TREND_CACHE_SEC = 3 * 3600;
+
+function fetchKrTrends_(codes) {
+  const cache = CacheService.getScriptCache();
+  const keys = codes.map((c) => 'tr|' + c);
+  let hit = {};
+  try { hit = cache.getAll(keys) || {}; } catch (e) { hit = {}; }
+
+  const out = {};
+  const miss = [];
+  codes.forEach((c, i) => {
+    const v = hit[keys[i]];
+    if (v) {
+      try { out[c] = JSON.parse(v); return; } catch (e) { /* 깨진 캐시는 다시 받는다 */ }
+    }
+    miss.push(c);
+  });
+
+  if (miss.length) {
+    const reqs = miss.map((c) => ({
+      url: trendUrl_(c, ''), muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0' },
+    }));
+    const put = {};
+    fetchAllChunked_(reqs).forEach((res, i) => {
+      if (!res) return;
+      try {
+        const rows = parseTrendHistory_(res.getContentText());
+        if (rows.length) {
+          out[miss[i]] = rows;
+          put['tr|' + miss[i]] = JSON.stringify(rows);
+        }
+      } catch (e) { /* 무시 */ }
+    });
+    if (Object.keys(put).length) {
+      try { cache.putAll(put, TREND_CACHE_SEC); } catch (e) { /* 무시 */ }
+      // 수급이 새로 들어왔을 때만 추이 캐시를 버린다
+      invalidateHistoryCache_();
+    }
+  }
   return out;
 }
 
@@ -1248,7 +1285,7 @@ function marketMatches_(mk, filter) {
 /* 시트가 수천 행이라 매번 다시 접으면 6~15초가 걸린다.
    조합별로 캐시해두면 두 번째부터는 즉시 응답한다.
    refreshAll이 10분마다 도니 TTL도 10분으로 맞춘다. */
-const HISTORY_CACHE_SEC = 600;
+const HISTORY_CACHE_SEC = 3 * 3600;
 const CACHE_MAX_BYTES = 90000; // CacheService 항목 상한(100KB)보다 여유 있게
 
 function getHistory_(period, market, metric, investor, from, to) {

@@ -436,12 +436,45 @@ function sectorCardHtml(s) {
 
 /* onLoading은 실제로 네트워크를 타는 경우에만 불린다.
    이게 없으면 GAS 응답이 6~15초 걸리는 동안 화면이 멈춘 것처럼 보인다. */
+const TREND_STORE_KEY = 'stock_trend_store';
+const TREND_STORE_TTL = 3 * 3600 * 1000;
+
+function trendStore() {
+  try { return JSON.parse(localStorage.getItem(TREND_STORE_KEY) || '{}'); } catch (e) { return {}; }
+}
+
+function trendStoreGet(key) {
+  const box = trendStore()[key];
+  if (!box || Date.now() - box.at > TREND_STORE_TTL) return null;
+  return box.data;
+}
+
+/* 응답이 커서 다 담으면 localStorage 한도를 넘는다. 최근 것만 남긴다. */
+function trendStorePut(key, data) {
+  try {
+    const all = trendStore();
+    all[key] = { at: Date.now(), data: data };
+    const keys = Object.keys(all).sort((a, b) => all[b].at - all[a].at).slice(0, 8);
+    const trimmed = {};
+    keys.forEach((k) => { trimmed[k] = all[k]; });
+    localStorage.setItem(TREND_STORE_KEY, JSON.stringify(trimmed));
+  } catch (e) { /* 용량 초과는 무시 */ }
+}
+
 async function fetchTrend(onLoading) {
   const cacheKey = `${trendPeriod}|${marketFilter}|${trendMetric}|${trendInvestor}|${trendFrom}|${trendTo}`;
   if (trendCache[cacheKey]) {
     TREND = trendCache[cacheKey];
     trendState = 'ready';
     return;
+  }
+  // 지난번 응답이 남아 있으면 먼저 그려주고, 아래에서 새로 받아 덮어쓴다
+  const stored = trendStoreGet(cacheKey);
+  if (stored) {
+    trendCache[cacheKey] = stored;
+    TREND = stored;
+    trendState = 'ready';
+    onLoading = null;
   }
   if (!isConfigured()) {
     trendState = 'error';
@@ -455,10 +488,11 @@ async function fetchTrend(onLoading) {
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     trendCache[cacheKey] = data;
+    trendStorePut(cacheKey, data);
     TREND = data;
     trendState = 'ready';
   } catch (err) {
-    trendState = 'error';
+    if (!stored) trendState = 'error';
   }
 }
 
@@ -1244,7 +1278,13 @@ function init() {
   render();
 
   if (isConfigured()) {
-    fetchDashboard().then(render);
+    fetchDashboard().then(() => {
+      render();
+      // 추이 탭을 누르기 전에 미리 받아둔다 (첫 조회가 GAS에서 6초 넘게 걸린다)
+      if (currentPage !== 'trend') {
+        fetchTrend().then(() => { if (currentPage === 'trend') render(); });
+      }
+    });
   }
 
   setInterval(doRefresh, AUTO_REFRESH_MS);

@@ -519,7 +519,9 @@ function sectorCardHtml(s) {
    추이 (일/월/연)
    ============================================================ */
 
-async function fetchTrend() {
+/* onLoading은 실제로 네트워크를 타는 경우에만 불린다.
+   이게 없으면 GAS 응답이 6~15초 걸리는 동안 화면이 멈춘 것처럼 보인다. */
+async function fetchTrend(onLoading) {
   const cacheKey = `${trendPeriod}|${marketFilter}|${trendMetric}|${trendInvestor}|${trendFrom}|${trendTo}`;
   if (trendCache[cacheKey]) {
     TREND = trendCache[cacheKey];
@@ -531,6 +533,7 @@ async function fetchTrend() {
     return;
   }
   trendState = 'loading';
+  if (onLoading) onLoading();
   try {
     const res = await fetch(`${gasUrl('history')}&period=${trendPeriod}&market=${marketFilter}&metric=${trendMetric}`
       + `&investor=${trendInvestor}&from=${trendFrom}&to=${trendTo}`);
@@ -787,7 +790,7 @@ function constituentsHtml() {
 }
 
 function bindTrendControls(el) {
-  const reload = async () => { await fetchTrend(); render(); };
+  const reload = async () => { await fetchTrend(render); render(); };
 
   el.querySelectorAll('[data-period]').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -1292,7 +1295,7 @@ function init() {
       currentPage = btn.dataset.page;
       render();
       if (currentPage === 'trend' && trendState !== 'ready') {
-        await fetchTrend();
+        await fetchTrend(render);
         render();
       }
     });
@@ -1306,7 +1309,7 @@ function init() {
       document.querySelectorAll('#marketSeg .market-btn').forEach((b) => b.classList.toggle('active', b.dataset.market === marketFilter));
       render();
       if (currentPage === 'trend') {
-        await fetchTrend();
+        await fetchTrend(render);
         render();
       }
     });

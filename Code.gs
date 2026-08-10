@@ -420,14 +420,14 @@ function saveMarketMap_(ss, map) {
   const codes = Object.keys(map);
   if (!codes.length) return;
   const sheet = getOrCreateSheet_(ss, 'StockMarket', ['itemCode', 'market']);
-  writeRows_(sheet, codes.map((c) => [c, map[c]]));
+  writeRows_(sheet, codes.map((c) => ["'" + c, map[c]]));
 }
 
 function loadMarketMap_(ss) {
   const sheet = getOrCreateSheet_(ss, 'StockMarket', ['itemCode', 'market']);
   const out = {};
   sheet.getDataRange().getValues().slice(1).forEach((r) => {
-    if (r[0]) out[String(r[0])] = String(r[1] || 'KOSPI');
+    if (r[0]) out[padKrCode_(r[0])] = String(r[1] || 'KOSPI');
   });
   return out;
 }
@@ -862,7 +862,7 @@ function syncEtfHoldings() {
 
     top.forEach((a) => {
       holdRows.push([today, sec.id, sec.etf.code, d.itemName || sec.etf.name,
-        Number(a.seq) || 0, String(a.itemCode || ''), String(a.itemName || ''),
+        Number(a.seq) || 0, "'" + padKrCode_(a.itemCode), String(a.itemName || ''),
         parseFloat(String(a.etfWeight || '0').replace('%', '')) || 0]);
     });
 
@@ -910,7 +910,7 @@ function activeKrStocks_(ss) {
       if (r[0] !== latest) return;
       const sid = r[1];
       if (!bySector[sid]) bySector[sid] = [];
-      bySector[sid].push({ code: String(r[5]), name: String(r[6]), weight: Number(r[7]) || 0 });
+      bySector[sid].push({ code: padKrCode_(r[5]), name: String(r[6]), weight: Number(r[7]) || 0 });
     });
     Object.keys(bySector).forEach((k) => bySector[k].sort((a, b) => b.weight - a.weight));
   }
@@ -1024,6 +1024,15 @@ function asDateStr_(v) {
     return Utilities.formatDate(v, 'Asia/Seoul', 'yyyy-MM-dd');
   }
   return String(v || '').slice(0, 10);
+}
+
+/* 시트가 '005930'을 숫자 5930으로 바꿔 앞자리 0을 날린다.
+   한국 종목코드는 대부분 0으로 시작하므로 그대로 쓰면 조회가 통째로 실패한다.
+   ETF 코드에는 '0117V0'처럼 문자가 섞여 있어 숫자일 때만 채운다. */
+function padKrCode_(v) {
+  const t = String(v == null ? '' : v).replace(/^'/, '').trim();
+  if (!t) return '';
+  return /^\d{1,6}$/.test(t) ? ('000000' + t).slice(-6) : t;
 }
 
 function normalizeDateCol_(rows, col) {

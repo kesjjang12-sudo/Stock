@@ -167,6 +167,7 @@ function doGet(e) {
     if (action === 'syncEtf') return jsonOut_(syncEtfHoldings());
     if (action === 'profile') return jsonOut_(profileRefresh_());
     if (action === 'score') return jsonOut_(sectorScores_(params.market));
+    if (action === 'rows') return jsonOut_(rawSectorDaily_(params.sector, params.from, params.to));
     if (action === 'backfill') {
       const r = backfillSectorDaily_(4.5 * 60 * 1000);
       return htmlOut_(r.finished ? '백필 완료' : '백필 진행 중',
@@ -2182,6 +2183,24 @@ function profileRefresh_() {
 
   const total = t.reduce((a, x) => a + x[1], 0);
   return { totalMs: total, steps: t, sectorDailyRows: getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS).getLastRow() - 1 };
+}
+
+/* 검산용 원본 행 조회. 집계된 값만 보면 어느 행이 왜 틀렸는지 알 수 없다. */
+function rawSectorDaily_(sectorId, from, to) {
+  const rows = getOrCreateSheet_(getDb_(), 'SectorDaily', SECTOR_DAILY_HEADERS)
+    .getDataRange().getValues().slice(1);
+  const out = [];
+  rows.forEach((r) => {
+    const d = asDateStr_(r[0]);
+    if (!d) return;
+    if (sectorId && r[1] !== sectorId) return;
+    if (from && d < from) return;
+    if (to && d > to) return;
+    out.push({ date: d, market: String(r[2]), net: Number(r[3]), frgn: Number(r[4]),
+               org: Number(r[5]), indi: Number(r[6]), pct: Number(r[7]), n: Number(r[8]) });
+  });
+  out.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+  return { count: out.length, rows: out.slice(0, 200) };
 }
 
 function hasEtfHoldings_(ss) {

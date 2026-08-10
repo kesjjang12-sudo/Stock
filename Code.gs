@@ -167,6 +167,8 @@ function doGet(e) {
     if (action === 'syncEtf') return jsonOut_(syncEtfHoldings());
     if (action === 'profile') return jsonOut_(profileRefresh_());
     if (action === 'risk') return jsonOut_(sectorRisk_(params.market));
+    if (action === 'stockrisk') return jsonOut_(stockRisk_());
+    if (action === 'syncStockRisk') return jsonOut_(syncStockRisk());
     if (action === 'target') return jsonOut_(calculateTargetScore());
     if (action === 'rows') return jsonOut_(rawSectorDaily_(params.sector, params.from, params.to));
     if (action === 'backfill') {
@@ -309,6 +311,7 @@ function setupTrigger() {
   ScriptApp.newTrigger('backfillOutcomes').timeBased().everyDays(1).atHour(8).create();
   ScriptApp.newTrigger('syncUsDaily').timeBased().everyDays(1).atHour(8).create();
   ScriptApp.newTrigger('syncEtfHoldings').timeBased().everyDays(1).atHour(7).create();
+  ScriptApp.newTrigger('syncStockRisk').timeBased().everyDays(1).atHour(8).create();
   syncEtfHoldings();
   refreshAll();
 }
@@ -2025,6 +2028,147 @@ function calculateTargetScore(asOfIndex) {
   if (!asOfIndex) {
     try { cache.put(ck, JSON.stringify(res), TARGET_CACHE_SEC); } catch (e) { /* 무시 */ }
   }
+  return res;
+}
+
+/* ============================================================
+   종목별 낙폭 확률 (매일 1회 계산해 시트에 저장)
+   ============================================================ */
+
+/* 화면에서 매번 62종목 이력을 받으면 2~3분이 걸린다. 하루 한 번만 받아
+   시트에 넣어두고 화면은 읽기만 한다. 변동성 구간은 평균 31거래일에 한 번
+   바뀌므로 하루 1회 갱신으로 충분하다.
+
+   확률표는 코스피 1~200위 181종목 25,340표본으로 만들고,
+   종목이 하나도 겹치지 않는 코스피·코스닥 201~400위 312종목 43,680표본에서
+   검증했다. 칸별 오차 평균 1.3~4.0%p. 실측이 예측보다 0~5%p 높게 나왔으므로
+   이 표는 보수적인 쪽이다. */
+const STOCK_RISK_HEADERS = ['date', 'code', 'name', 'sectorId', 'market', 'vol20', 'vol60',
+  'band', 'dd60', 'p5_5', 'p7_5', 'p10_5', 'p5_10', 'p7_10', 'p10_10', 'p5_20', 'p7_20', 'p10_20'];
+
+const VOL_CUTS = [25.2, 34.0, 42.9, 56.8];          // 연율 % — 5분위 경계
+const VOL_BANDS = ['매우낮음', '낮음', '보통', '높음', '매우높음'];
+
+/* [구간][기간] = {5%, 7%, 10% 하락 확률}. 기간은 5 / 10 / 20거래일 */
+const DD_PROB = [
+  { 5: [6, 2, 1], 10: [17, 8, 3], 20: [37, 21, 9] },
+  { 5: [19, 9, 3], 10: [42, 24, 10], 20: [72, 51, 28] },
+  { 5: [26, 12, 4], 10: [52, 32, 14], 20: [81, 63, 39] },
+  { 5: [36, 21, 9], 10: [64, 46, 25], 20: [89, 75, 52] },
+  { 5: [53, 38, 22], 10: [78, 65, 46], 20: [94, 87, 72] },
+];
+const DD_BASIS = {
+  train: '코스피 1~200위 181종목 · 25,340표본',
+  test: '코스피·코스닥 201~400위 312종목 · 43,680표본 (종목 겹침 0)',
+  error: '칸별 캘리브레이션 오차 평균 1.3~4.0%p, 실측이 0~5%p 높음(보수적)',
+  basisIC: '60일 실현변동성 → 이후 낙폭, 홀드아웃 IC +0.632',
+};
+const STOCK_RISK_PAGES = 7;   // 10거래일 × 7 = 70일이면 vol60에 충분
+
+
+function volBandIndex_(vol60) {
+  for (let k = 0; k < VOL_CUTS.length; k++) {
+    if (vol60 < VOL_CUTS[k]) return k;
+  }
+  return VOL_BANDS.length - 1;
+}
+
+/* 최신일 우선 이력에서 일간 등락률을 뽑는다 (winFrom_과 같은 방향 규칙) */
+function dailyReturns_(hist) {
+  const out = [];
+  for (let j = 0; j < hist.length - 1; j++) {
+    const cur = hist[j].closePrice;
+    const prev = hist[j + 1].closePrice;
+    if (cur && prev) out.push((cur / prev - 1) * 100);
+  }
+  return out;
+}
+
+function syncStockRisk() {
+  const ss = getDb_();
+  const active = activeKrStocks_(ss);
+  const marketOf = loadMarketMap_(ss);
+
+  const codes = [];
+  const owner = {};
+  SECTOR_CONFIG.forEach((sec) => {
+    (active[sec.id] || []).forEach((s) => {
+      if (owner[s.code] === undefined) { codes.push(s.code); owner[s.code] = { sectorId: sec.id, name: s.name }; }
+    });
+  });
+  if (!codes.length) return { error: 'ETF 구성종목이 없습니다. syncEtf를 먼저 실행하세요.' };
+
+  const hists = fetchTrendDeepMulti_(codes, STOCK_RISK_PAGES);
+  const today = todayStr_();
+  const rows = [];
+  codes.forEach((code) => {
+    const h = hists[code] || [];
+    if (h.length < 45) return;
+    const rets = dailyReturns_(h);
+    const sd60 = stdev_(rets.slice(0, 60));
+    const sd20 = stdev_(rets.slice(0, 20));
+    if (sd60 == null) return;
+    const vol60 = +(sd60 * ANNUALIZE).toFixed(1);
+    const vol20 = sd20 == null ? null : +(sd20 * ANNUALIZE).toFixed(1);
+    const b = volBandIndex_(vol60);
+    // 낙폭은 과거→최근 순으로 곱해야 하므로 뒤집는다
+    const dd60 = +maxDrawdown_(rets.slice(0, 60).reverse()).toFixed(1);
+    const p = DD_PROB[b];
+    rows.push([today, "'" + code, owner[code].name, owner[code].sectorId, marketOf[code] || 'KOSPI',
+      vol20, vol60, VOL_BANDS[b], dd60,
+      p[5][0], p[5][1], p[5][2], p[10][0], p[10][1], p[10][2], p[20][0], p[20][1], p[20][2]]);
+  });
+
+  if (!rows.length) return { error: '계산된 종목이 없습니다.' };
+
+  /* 같은 날 다시 돌면 그날 행을 갈아끼운다 (하루 한 행 유지) */
+  const sheet = getOrCreateSheet_(ss, 'StockRisk', STOCK_RISK_HEADERS);
+  const W = STOCK_RISK_HEADERS.length;
+  const old = sheet.getDataRange().getValues().slice(1)
+    .filter((r) => asDateStr_(r[0]) !== today);
+  const all = old.concat(rows);
+  sheet.clear();
+  sheet.getRange(1, 1, 1, W).setValues([STOCK_RISK_HEADERS]);
+  sheet.getRange(2, 1, all.length, W).setValues(all);
+  try { CacheService.getScriptCache().put('srver', Utilities.getUuid(), 21600); } catch (e) {}
+  return { ok: true, date: today, count: rows.length };
+}
+
+/* 화면용 — 시트에서 가장 최근 날짜만 읽어 즉시 돌려준다 (네트워크 요청 없음) */
+function stockRisk_() {
+  const cache = CacheService.getScriptCache();
+  let ver = '';
+  try { ver = cache.get('srver') || ''; } catch (e) {}
+  const ck = 'sr|' + ver;
+  try {
+    const hit = cache.get(ck);
+    if (hit) return JSON.parse(hit);
+  } catch (e) {}
+
+  const rows = getOrCreateSheet_(getDb_(), 'StockRisk', STOCK_RISK_HEADERS).getDataRange().getValues().slice(1);
+  let latest = '';
+  rows.forEach((r) => { const d = asDateStr_(r[0]); if (d > latest) latest = d; });
+  if (!latest) {
+    return { asOf: '', stocks: [], bands: VOL_BANDS, cuts: VOL_CUTS, basis: DD_BASIS,
+      note: '아직 계산된 적이 없습니다. action=syncStockRisk 를 한 번 열어주세요.' };
+  }
+
+  const out = [];
+  rows.forEach((r) => {
+    if (asDateStr_(r[0]) !== latest) return;
+    out.push({
+      code: padKrCode_(r[1]), name: String(r[2]), sectorId: String(r[3]), market: String(r[4]),
+      vol20: Number(r[5]), vol60: Number(r[6]), band: String(r[7]), dd60: Number(r[8]),
+      p: { 5: [Number(r[9]), Number(r[10]), Number(r[11])],
+           10: [Number(r[12]), Number(r[13]), Number(r[14])],
+           20: [Number(r[15]), Number(r[16]), Number(r[17])] },
+    });
+  });
+  out.sort((a, b) => b.vol60 - a.vol60);
+  const res = { asOf: latest, stocks: out, bands: VOL_BANDS, cuts: VOL_CUTS,
+    thresholds: [5, 7, 10], horizons: [5, 10, 20], basis: DD_BASIS,
+    caveat: '방향이 아니라 흔들림의 크기입니다. 크게 빠질 확률이 높다는 건 크게 오를 확률도 높다는 뜻입니다.' };
+  try { cache.put(ck, JSON.stringify(res), 6 * 3600); } catch (e) {}
   return res;
 }
 

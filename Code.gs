@@ -2285,6 +2285,15 @@ function syncUniverse() {
   return { ok: true, count: rows.length, newIndustry: need.length };
 }
 
+/* 유니버스를 마지막으로 새로 짠 날 */
+function universeAsOf_(ss) {
+  const rows = resetSheetIfSchemaChanged_(ss, 'StockUniverse', UNIVERSE_HEADERS)
+    .getDataRange().getValues().slice(1);
+  let latest = '';
+  rows.forEach((r) => { const d = asDateStr_(r[8]); if (d > latest) latest = d; });
+  return latest;
+}
+
 function loadUniverse_(ss) {
   const sheet = resetSheetIfSchemaChanged_(ss, 'StockUniverse', UNIVERSE_HEADERS);
   const out = [];
@@ -2487,9 +2496,13 @@ function syncStockRisk() {
   const started = Date.now();
   const ss = getDb_();
 
+  /* 시총 순위는 매일 바뀐다. 별도 트리거에 기대지 않고 여기서 하루 한 번 갱신한다
+     (순위 6요청 + 처음 보는 종목의 업종만 물으므로 평소엔 거의 공짜다). */
   let uni = loadUniverse_(ss);
-  const staleUniverse = !uni.length || uni.length < UNIVERSE_N;
-  if (staleUniverse) { syncUniverse(); uni = loadUniverse_(ss); }
+  if (!uni.length || uni.length < UNIVERSE_N || universeAsOf_(ss) !== todayStr_()) {
+    syncUniverse();
+    uni = loadUniverse_(ss);
+  }
   if (!uni.length) return { error: '유니버스를 만들지 못했습니다. action=syncUniverse 를 먼저 열어주세요.' };
 
   const cl = refreshCloses_(ss, uni, started + STOCK_RISK_BUDGET_MS);

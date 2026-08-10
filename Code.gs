@@ -336,6 +336,7 @@ function refreshAll() {
 
   logDailySectorPct_(ss, results);
   logSectorDailyFromQuotes_(ss, quotes);
+  invalidateHistoryCache_();
   detectDropEvents_(ss, results);
   checkAlerts_(ss, results);
 }
@@ -1077,6 +1078,7 @@ function backfillSectorDaily_(maxMs) {
     props.setProperty('BACKFILL_CURSOR', String(cursor));
   }
 
+  invalidateHistoryCache_();
   const finished = cursor >= SECTOR_CONFIG.length;
   if (finished) props.deleteProperty('BACKFILL_CURSOR');
   return { finished: finished, done: cursor, total: SECTOR_CONFIG.length, log: log };
@@ -1107,6 +1109,7 @@ function syncUsDaily() {
 
   if (Object.keys(byKey).length) {
     upsertSectorDaily_(getOrCreateSheet_(ss, 'SectorDaily', SECTOR_DAILY_HEADERS), byKey);
+    invalidateHistoryCache_();
   }
 }
 
@@ -1134,7 +1137,29 @@ function marketMatches_(mk, filter) {
 
 /* 수급은 합계, 등락률은 누적 수익률(곱), 뉴스는 합계로 접는다.
    등락률을 평균이나 합으로 접으면 기간 수익률이 아닌 값이 나온다. */
+/* 시트가 수천 행이라 매번 다시 접으면 6~15초가 걸린다.
+   조합별로 캐시해두면 두 번째부터는 즉시 응답한다.
+   refreshAll이 10분마다 도니 TTL도 10분으로 맞춘다. */
+const HISTORY_CACHE_SEC = 600;
+const CACHE_MAX_BYTES = 90000; // CacheService 항목 상한(100KB)보다 여유 있게
+
 function getHistory_(period, market, metric, investor, from, to) {
+  const cacheKey = ['h', historyCacheVersion_(), period, market, metric, investor, from, to].join('|');
+  const cache = CacheService.getScriptCache();
+  try {
+    const hit = cache.get(cacheKey);
+    if (hit) return JSON.parse(hit);
+  } catch (e) { /* 캐시 실패는 무시하고 새로 계산 */ }
+
+  const out = computeHistory_(period, market, metric, investor, from, to);
+  try {
+    const json = JSON.stringify(out);
+    if (json.length < CACHE_MAX_BYTES) cache.put(cacheKey, json, HISTORY_CACHE_SEC);
+  } catch (e) { /* 무시 */ }
+  return out;
+}
+
+function computeHistory_(period, market, metric, investor, from, to) {
   period = HISTORY_LIMIT[period] ? period : 'day';
   market = ['kr', 'us', 'kospi', 'kosdaq'].indexOf(market) > -1 ? market : 'all';
   metric = (metric === 'price' || metric === 'news') ? metric : 'flow';
@@ -1638,6 +1663,22 @@ function writeRows_(sheet, rows) {
   const lastRow = sheet.getLastRow();
   if (lastRow > 1) sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).clearContent();
   if (rows.length) sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+/* 키를 일일이 지우는 대신 버전을 올린다. 기간 지정처럼 조합이 무한한 키도 한 번에 무효화된다. */
+function historyCacheVersion_() {
+  const cache = CacheService.getScriptCache();
+  let v = cache.get('hver');
+  if (!v) {
+    v = Utilities.getUuid();
+    cache.put('hver', v, 21600);
+  }
+  return v;
+}
+
+/* 타임스탬프를 쓰면 같은 밀리초 안에 두 번 무효화될 때 값이 그대로라 캐시가 안 비워진다 */
+function invalidateHistoryCache_() {
+  try { CacheService.getScriptCache().put('hver', Utilities.getUuid(), 21600); } catch (e) { /* 무시 */ }
 }
 
 function hasEtfHoldings_(ss) {

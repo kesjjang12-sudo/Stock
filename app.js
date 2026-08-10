@@ -185,19 +185,24 @@ let flashIds = new Set();
 const MARKET_KEY = 'stock_market_filter';
 let marketFilter = localStorage.getItem(MARKET_KEY) || 'all'; // all | kr | us
 
-const MARKET_LABEL = { all: '전체', kr: '국장', us: '미장' };
+const MARKET_LABEL = { all: '전체', kr: '국장', kospi: '코스피', kosdaq: '코스닥', us: '미장' };
 
 const TREND_PERIOD_KEY = 'stock_trend_period';
 const TREND_METRIC_KEY = 'stock_trend_metric';
 let trendPeriod = localStorage.getItem(TREND_PERIOD_KEY) || 'month'; // day | month | year
 let trendMetric = localStorage.getItem(TREND_METRIC_KEY) || 'flow';  // flow | price | news
 let trendSector = 'all';
+const TREND_INVESTOR_KEY = 'stock_trend_investor';
+let trendInvestor = localStorage.getItem(TREND_INVESTOR_KEY) || 'net'; // net | frgn | org | indi
+let trendFrom = '';
+let trendTo = '';
 let TREND = null;
 let trendState = 'idle'; // idle | loading | ready | error
 const trendCache = {};
 
 const PERIOD_LABEL = { day: '일별', month: '월별', year: '연도별' };
 const METRIC_LABEL = { flow: '수급', price: '등락률', news: '뉴스' };
+const INVESTOR_LABEL = { net: '외인+기관', frgn: '외국인', org: '기관', indi: '개인' };
 
 /* ============================================================
    유틸
@@ -236,21 +241,36 @@ const SIGNAL_THRESHOLD = 40;
 /* 백엔드는 한 섹터에 국내·미국 종목을 함께 담아 내려준다.
    국장/미장 탭은 그 종목 배열을 시장별로 갈라서 지표를 다시 집계한 뷰다.
    원본 SECTORS는 건드리지 않으므로 탭을 바꿔도 원 데이터는 그대로 남는다. */
+/* 백엔드는 종목 시장을 KOSPI/KOSDAQ/US로 준다.
+   '국장'은 코스피+코스닥을 함께 본다. */
+function matchesMarket_(stockMarket, filter) {
+  if (filter === 'all') return true;
+  if (filter === 'kr') return stockMarket === 'KOSPI' || stockMarket === 'KOSDAQ';
+  if (filter === 'kospi') return stockMarket === 'KOSPI';
+  if (filter === 'kosdaq') return stockMarket === 'KOSDAQ';
+  if (filter === 'us') return stockMarket === 'US';
+  return true;
+}
+
+function isKrFilter_(filter) {
+  return filter === 'kr' || filter === 'kospi' || filter === 'kosdaq';
+}
+
 function viewSectors() {
   if (marketFilter === 'all') return SECTORS;
-  const mk = marketFilter === 'kr' ? 'KR' : 'US';
   return SECTORS
     .map((s) => {
-      const stocks = (s.stocks || []).filter((st) => st.market === mk);
+      const stocks = (s.stocks || []).filter((st) => matchesMarket_(st.market, marketFilter));
       if (!stocks.length) return null;
-      const isKr = mk === 'KR';
+      const isKr = isKrFilter_(marketFilter);
+      const newsCount = isKr ? s.newsKr : s.newsUs;
       return {
         ...s,
         stocks,
         netFlow: isKr ? stocks.reduce((a, st) => a + (st.flow || 0), 0) : 0,
         flowChangePct: isKr ? s.flowChangePct : 0,
         avgChangePct: +(stocks.reduce((a, st) => a + st.changePct, 0) / stocks.length).toFixed(2),
-        newsVolume: (isKr ? s.newsKr : s.newsUs) != null ? (isKr ? s.newsKr : s.newsUs) : s.newsVolume,
+        newsVolume: newsCount != null ? newsCount : s.newsVolume,
       };
     })
     .filter(Boolean);
@@ -418,8 +438,8 @@ function renderFlowPage(el) {
   const mode = effectiveSortMode();
   const title = marketFilter === 'us'
     ? '🇺🇸 미장 섹터 — 등락률·뉴스 흐름'
-    : marketFilter === 'kr'
-      ? '🇰🇷 국장 섹터 — 외국인·기관 수급'
+    : isKrFilter_(marketFilter)
+      ? `${MARKET_LABEL[marketFilter]} 섹터 — 외국인·기관 수급`
       : '섹터별 자금흐름';
   const usNote = marketFilter === 'us'
     ? `<div class="signal-note">미국 시장은 외국인·기관 순매매 같은 공개 수급 데이터가 없어요. 등락률과 뉴스 언급량으로만 봅니다.</div>`
@@ -500,7 +520,7 @@ function sectorCardHtml(s) {
    ============================================================ */
 
 async function fetchTrend() {
-  const cacheKey = `${trendPeriod}|${marketFilter}|${trendMetric}`;
+  const cacheKey = `${trendPeriod}|${marketFilter}|${trendMetric}|${trendInvestor}|${trendFrom}|${trendTo}`;
   if (trendCache[cacheKey]) {
     TREND = trendCache[cacheKey];
     trendState = 'ready';
@@ -512,7 +532,8 @@ async function fetchTrend() {
   }
   trendState = 'loading';
   try {
-    const res = await fetch(`${gasUrl('history')}&period=${trendPeriod}&market=${marketFilter}&metric=${trendMetric}`);
+    const res = await fetch(`${gasUrl('history')}&period=${trendPeriod}&market=${marketFilter}&metric=${trendMetric}`
+      + `&investor=${trendInvestor}&from=${trendFrom}&to=${trendTo}`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     trendCache[cacheKey] = data;
@@ -600,7 +621,27 @@ function trendChart(buckets, points) {
   `;
 }
 
+/* 수급은 합계로, 등락률은 복리로 누적한다 */
+function cumulativeOf(points, metric) {
+  let acc = metric === 'price' ? 1 : 0;
+  return points.map((v) => {
+    if (v === null || v === undefined) return null;
+    if (metric === 'price') {
+      acc *= 1 + v / 100;
+      return +((acc - 1) * 100).toFixed(2);
+    }
+    acc += v;
+    return Math.round(acc);
+  });
+}
+
 function renderTrendPage(el) {
+  const investorSeg = trendMetric === 'flow'
+    ? `<div class="sort-bar">
+         ${['net', 'frgn', 'org', 'indi'].map((iv) => `<button class="sort-btn ${trendInvestor === iv ? 'active' : ''}" data-investor="${iv}">${INVESTOR_LABEL[iv]}</button>`).join('')}
+       </div>`
+    : '';
+
   const segs = `
     <div class="trend-controls">
       <div class="sort-bar">
@@ -609,6 +650,14 @@ function renderTrendPage(el) {
       <div class="sort-bar">
         ${['flow', 'price', 'news'].map((m) => `<button class="sort-btn ${trendMetric === m ? 'active' : ''}" data-metric="${m}">${METRIC_LABEL[m]}</button>`).join('')}
       </div>
+      ${investorSeg}
+    </div>
+    <div class="range-bar">
+      <label class="range-label">기간</label>
+      <input type="date" class="range-input" id="trFrom" value="${trendFrom}">
+      <span class="range-sep">~</span>
+      <input type="date" class="range-input" id="trTo" value="${trendTo}">
+      ${(trendFrom || trendTo) ? '<button class="sort-btn" id="trClear">전체</button>' : ''}
     </div>
   `;
 
@@ -637,35 +686,39 @@ function renderTrendPage(el) {
   const buckets = (TREND && TREND.buckets) || [];
   if (!buckets.length) {
     const backfillLink = isConfigured()
-      ? `<div class="signal-note">아직 쌓인 기록이 없어요. <a class="banner-link" href="${gasUrl('backfill')}" target="_blank" rel="noopener">과거 데이터 채우기</a>를 열면 작년치까지 한 번에 채워집니다. (1분쯤 걸리고, 안 끝나면 새로고침해서 이어서 진행)</div>`
+      ? `<div class="signal-note">아직 쌓인 기록이 없어요. <a class="banner-link" href="${gasUrl('backfill')}" target="_blank" rel="noopener">과거 데이터 채우기</a>를 열면 작년치까지 채워집니다. (안 끝나면 새로고침해서 이어서 진행)</div>`
       : `<div class="signal-note">GAS를 먼저 연결해주세요.</div>`;
     el.innerHTML = `
       <div class="section-title">추이</div>${segs}
-      <div class="empty-state"><div class="empty-icon">📈</div>${trendMetric === 'news' ? '뉴스 언급량은 오늘부터 쌓여요. 하루 이틀 뒤에 다시 보세요.' : '표시할 기록이 없어요.'}</div>
+      <div class="empty-state"><div class="empty-icon">📈</div>${trendMetric === 'news' ? '뉴스 언급량은 연동한 날부터 쌓여요.' : '이 기간에는 기록이 없어요.'}</div>
       ${trendMetric === 'news' ? '' : backfillLink}`;
     bindTrendControls(el);
     return;
   }
 
   const points = trendPoints(trendSector);
+  const cum = cumulativeOf(points, TREND.metric);
   const vals = points.filter((v) => v !== null && v !== undefined);
   const total = vals.reduce((a, b) => a + b, 0);
+  const lastCum = cum.filter((v) => v !== null).slice(-1)[0];
   const summary = TREND.metric === 'price'
-    ? `평균 ${fmtPct(vals.length ? total / vals.length : 0)}`
+    ? `누적 ${fmtPct(lastCum || 0)}`
     : `합계 ${trendValueLabel(TREND.metric === 'flow' ? Math.round(total) : total)}`;
 
   const chips = [{ sectorId: 'all', name: '전체', icon: '📊' }].concat(TREND.series)
     .map((s) => `<button class="market-btn ${trendSector === s.sectorId ? 'active' : ''}" data-sector="${s.sectorId}">${s.icon} ${s.name}</button>`)
     .join('');
 
-  const rows = buckets.map((b, i) => ({ b, v: points[i] }))
+  const rows = buckets.map((b, i) => ({ b, v: points[i], c: cum[i] }))
     .filter((r) => r.v !== null && r.v !== undefined)
     .reverse()
-    .slice(0, 12);
+    .slice(0, 15);
+
+  const metricHead = TREND.metric === 'flow' ? `${INVESTOR_LABEL[trendInvestor]} 수급` : METRIC_LABEL[TREND.metric];
 
   el.innerHTML = `
     <div class="section-title-row">
-      <div class="section-title">${MARKET_LABEL[marketFilter]} · ${METRIC_LABEL[trendMetric]} ${PERIOD_LABEL[trendPeriod]} 추이</div>
+      <div class="section-title">${MARKET_LABEL[marketFilter]} · ${metricHead} ${PERIOD_LABEL[trendPeriod]} 추이</div>
     </div>
     ${segs}
     <div class="market-seg trend-chips">${chips}</div>
@@ -675,22 +728,25 @@ function renderTrendPage(el) {
         <div class="trend-summary">${summary}</div>
       </div>
       ${trendChart(buckets, points)}
+      <div class="trend-foot">${buckets[0]} ~ ${buckets[buckets.length - 1]} · ${buckets.length}개 구간</div>
     </div>
     <div class="section-title">기간별 값</div>
     <div class="table-wrap">
       <table class="detail-stock-table">
-        <thead><tr><th>기간</th><th>${METRIC_LABEL[trendMetric]}</th></tr></thead>
+        <thead><tr><th>기간</th><th>${metricHead}</th><th>누적</th></tr></thead>
         <tbody>
           ${rows.map((r) => `
             <tr>
               <td>${r.b}</td>
               <td class="${r.v >= 0 ? 'val-up' : 'val-down'}">${trendValueLabel(r.v)}</td>
+              <td class="${r.c >= 0 ? 'val-up' : 'val-down'}">${trendValueLabel(r.c)}</td>
             </tr>`).join('')}
         </tbody>
       </table>
     </div>
-    ${trendMetric === 'price' ? `<div class="signal-note">월·연도 등락률은 일별 수익률을 곱해 누적한 값이에요 (단순 합계가 아닙니다).</div>` : ''}
-    ${trendMetric === 'flow' ? `<div class="signal-note">수급은 국내 상장 종목만 집계돼요. 미국 종목은 공개 데이터가 없습니다.</div>` : ''}
+    ${constituentsHtml()}
+    ${TREND.metric === 'price' ? `<div class="signal-note">월·연도 등락률은 일별 수익률을 곱해 누적한 값이에요 (단순 합계가 아닙니다).</div>` : ''}
+    ${TREND.metric === 'flow' ? `<div class="signal-note">수급은 국내 상장 종목만 집계돼요. 미국 종목은 공개 데이터가 없습니다.</div>` : ''}
   `;
 
   bindTrendControls(el);
@@ -702,23 +758,65 @@ function renderTrendPage(el) {
   });
 }
 
+/* 어떤 종목으로 집계했는지 보여준다 — ETF 리밸런싱으로 구성이 바뀌므로 확인이 필요하다 */
+function constituentsHtml() {
+  const c = TREND && TREND.constituents;
+  if (!c) return '';
+
+  const ids = trendSector === 'all' ? TREND.series.map((s) => s.sectorId) : [trendSector];
+  const blocks = ids.map((id) => {
+    const info = c[id];
+    if (!info) return '';
+    const sec = TREND.series.find((s) => s.sectorId === id) || {};
+    const list = [];
+    if (isKrFilter_(marketFilter) || marketFilter === 'all') list.push(...(info.kr || []));
+    if (marketFilter === 'us' || marketFilter === 'all') list.push(...(info.us || []));
+    if (!list.length) return '';
+    return `
+      <div class="const-row">
+        <div class="const-head">${sec.icon || ''} ${sec.name || id}${info.etf ? ` <span class="const-etf">${info.etf}</span>` : ''}</div>
+        <div class="const-list">${list.join(' · ')}</div>
+      </div>`;
+  }).filter(Boolean).join('');
+
+  if (!blocks) return '';
+  return `
+    <div class="section-title">집계에 쓴 종목</div>
+    <div class="card const-card">${blocks}</div>
+    <div class="signal-note">ETF가 있는 섹터는 그 ETF의 구성종목 상위 10개를 씁니다. 리밸런싱되면 자동으로 바뀌고, 바뀐 날짜는 시트에 남습니다.</div>`;
+}
+
 function bindTrendControls(el) {
+  const reload = async () => { await fetchTrend(); render(); };
+
   el.querySelectorAll('[data-period]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       trendPeriod = btn.dataset.period;
       localStorage.setItem(TREND_PERIOD_KEY, trendPeriod);
-      await fetchTrend();
-      render();
+      await reload();
     });
   });
   el.querySelectorAll('[data-metric]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       trendMetric = btn.dataset.metric;
       localStorage.setItem(TREND_METRIC_KEY, trendMetric);
-      await fetchTrend();
-      render();
+      await reload();
     });
   });
+  el.querySelectorAll('[data-investor]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      trendInvestor = btn.dataset.investor;
+      localStorage.setItem(TREND_INVESTOR_KEY, trendInvestor);
+      await reload();
+    });
+  });
+
+  const from = el.querySelector('#trFrom');
+  const to = el.querySelector('#trTo');
+  if (from) from.addEventListener('change', async () => { trendFrom = from.value; await reload(); });
+  if (to) to.addEventListener('change', async () => { trendTo = to.value; await reload(); });
+  const clear = el.querySelector('#trClear');
+  if (clear) clear.addEventListener('click', async () => { trendFrom = ''; trendTo = ''; await reload(); });
 }
 
 function renderHistoryPage(el) {

@@ -381,7 +381,7 @@ function renderAlertsPage(el) {
 
   el.innerHTML = `
     <div class="section-title-row">
-      <div class="section-title">알림 — 하락·선제 신호가 감지되면 여기 쌓여요</div>
+      <div class="section-title">알림 — 왜 떴는지 근거까지 같이 보여줘요</div>
       <button class="sort-btn" id="markSeenBtn">모두 읽음</button>
     </div>
     ${ALERTS.map((a) => alertCardHtml(a, !seen.has(a.id))).join('')}
@@ -396,18 +396,60 @@ function renderAlertsPage(el) {
   setTimeout(() => { markAllSeen(); renderUnseenBadge(); }, 2500);
 }
 
+const ALERT_META = {
+  inflow:    { label: '자금 유입', icon: '💰' },
+  outflow:   { label: '자금 이탈', icon: '🚪' },
+  drop:      { label: '급락', icon: '📉' },
+  turn_buy:  { label: '수급 전환 · 매수', icon: '🔄' },
+  turn_sell: { label: '수급 전환 · 매도', icon: '🔄' },
+  signal:    { label: '선제 신호', icon: '⚠️' },
+};
+
+const DIRECTION_META = {
+  positive: { label: '긍정', cls: 'dir-positive' },
+  negative: { label: '부정', cls: 'dir-negative' },
+  caution:  { label: '주의', cls: 'dir-caution' },
+};
+
 function alertCardHtml(a, isNew) {
-  const isDrop = a.type === 'drop';
-  const lines = String(a.body).split('\n');
-  const head = lines[0] || '';
-  const rest = lines.slice(1);
+  const meta = ALERT_META[a.type] || { label: a.type, icon: '🔔' };
+  const dir = DIRECTION_META[a.direction] || DIRECTION_META.caution;
+  const basis = Array.isArray(a.basis) ? a.basis : [];
+
+  // 옛 알림은 basis가 없어 body를 그대로 보여준다
+  const bodyLines = basis.length
+    ? ''
+    : String(a.body || '').split('\n').slice(1).map((l) => `<div class="alert-line">${l}</div>`).join('');
+
+  const basisHtml = basis.length
+    ? `<div class="alert-basis">
+         ${basis.map((b) => `
+           <div class="basis-row">
+             <span class="basis-label">${b.label}</span>
+             <span class="basis-value">${b.value}</span>
+             ${b.note ? `<span class="basis-note">${b.note}</span>` : ''}
+           </div>`).join('')}
+       </div>`
+    : '';
+
+  const newsHtml = a.headline
+    ? `<div class="alert-news">
+         ${a.link ? `<a href="${a.link}" target="_blank" rel="noopener" class="alert-news-title">${a.headline}</a>`
+                  : `<span class="alert-news-title">${a.headline}</span>`}
+         <span class="alert-news-src">${a.source || '출처 미상'}</span>
+       </div>`
+    : '';
+
   return `
-    <div class="alert-card ${isDrop ? 'alert-drop' : 'alert-signal'} ${isNew ? 'alert-new' : ''}">
+    <div class="alert-card ${dir.cls} ${isNew ? 'alert-new' : ''}">
       <div class="alert-top">
-        <span class="alert-head">${head}</span>
+        <span class="alert-head">${meta.icon} ${a.sectorName || ''} · ${meta.label}</span>
         <span class="alert-time">${isNew ? '<span class="alert-dot"></span>' : ''}${alertTimeLabel(a.at)}</span>
       </div>
-      ${rest.map((l) => `<div class="alert-line">${l}</div>`).join('')}
+      <div class="alert-dir"><span class="pill ${dir.cls}-pill">${dir.label}</span></div>
+      ${basisHtml}
+      ${bodyLines}
+      ${newsHtml}
     </div>
   `;
 }
@@ -964,14 +1006,7 @@ function openSectorDetail(id) {
       </tbody>
     </table>
     <div class="section-title" style="margin-top:20px;">관련 뉴스${connStatus === 'live' ? '' : ' (샘플)'}</div>
-    <div class="news-list">
-      ${mockNewsFor(s).map((n) => `
-        <div class="news-item">
-          <div class="news-item-title">${n.title}</div>
-          <div class="news-item-meta">${n.source} · ${n.time}</div>
-        </div>
-      `).join('')}
-    </div>
+    <div class="news-list">${sectorNewsHtml(s)}</div>
   `;
   document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
   document.getElementById('modalOverlay').classList.add('open');
@@ -979,6 +1014,37 @@ function openSectorDetail(id) {
 
 function closeModal() {
   document.getElementById('modalOverlay').classList.remove('open');
+}
+
+/* 실데이터가 있으면 출처·링크가 붙은 실제 기사를, 없으면 샘플을 보여준다.
+   집계에 쓰인 기사와 같은 목록이라 숫자와 화면이 어긋나지 않는다. */
+function sectorNewsHtml(s) {
+  const items = (s.newsItems || []).filter((n) => n && n.title);
+  if (!items.length) {
+    return mockNewsFor(s).map((n) => `
+      <div class="news-item">
+        <div class="news-item-title">${n.title}</div>
+        <div class="news-item-meta">${n.source} · ${n.time}</div>
+      </div>`).join('');
+  }
+  const filtered = s.newsRaw && s.newsRaw > s.newsVolume
+    ? `<div class="news-filtered">증시와 무관하거나 중복인 기사 ${s.newsRaw - s.newsVolume}건은 집계에서 뺐어요.</div>`
+    : '';
+  return items.map((n) => `
+    <div class="news-item">
+      ${n.link ? `<a class="news-item-title news-link" href="${n.link}" target="_blank" rel="noopener">${n.title}</a>`
+               : `<div class="news-item-title">${n.title}</div>`}
+      <div class="news-item-meta">${n.source || '출처 미상'} · ${n.lang === 'en' ? '해외' : '국내'} · ${newsAgo(n.pubDate)}</div>
+    </div>`).join('') + filtered;
+}
+
+function newsAgo(pubDate) {
+  const t = new Date(pubDate).getTime();
+  if (!isFinite(t)) return '';
+  const m = Math.max(0, Math.round((Date.now() - t) / 60000));
+  if (m < 60) return `${m}분 전`;
+  if (m < 1440) return `${Math.floor(m / 60)}시간 전`;
+  return `${Math.floor(m / 1440)}일 전`;
 }
 
 function mockNewsFor(s) {

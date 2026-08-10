@@ -87,3 +87,17 @@
 ## GitHub
 - Repo: https://github.com/kesjjang12-sudo/stock
 - Branch: main (직접 push, PR 없이 진행)
+
+## 알림 (재설계됨)
+`AlertLog` 스키마: `[date, sectorId, sectorName, type, sentAt, body, direction, headline, source, link, basisJson]`
+- 종류: `inflow`(자금유입) `outflow`(자금이탈) `drop`(급락) `turn_buy`/`turn_sell`(수급전환). 각각 `direction`(positive/negative/caution)이 고정돼 있다 — 예전엔 "괴리 -103%p"만 던져서 좋은 신호인지 알 수 없었다
+- `basis`는 `[{label, value, note}]` 구조. 화면이 근거를 표로 보여주고 카톡 본문은 상위 3개만 쓴다
+- `detectFlowTurn_`은 3거래일 이상 연속 매도/매수가 끊긴 날을 잡는다 (크기보다 방향 전환이 의미 있는 경우)
+- 옛 6열 행은 `basis`가 비어 있어 프론트가 `body`를 그대로 표시한다 (`migrateAlertLog_`가 헤더만 넓힌다)
+
+## 뉴스
+- **증시 연관성 필터**: 제목에 `MARKET_WORDS_KR/EN`이 하나도 없으면 집계 제외. 실측 100건 → 54건
+- **중복 제거**: 단어 집합 겹침(Jaccard) ≥ 0.6이면 같은 기사로 본다. 앞부분 문자열 비교는 `[속보]` 같은 말머리에 뚫린다
+- **출처**: 구글뉴스 제목의 `" - 매체명"`을 `splitSource_`로 분리. `cleanHeadline_`은 제목만, `decodeHeadline_`은 엔티티만 푼다
+- **수집량**: 뉴스는 `CacheService`로 1시간 캐시. 10분마다 받을 이유가 없어 요청이 6분의 1로 줄었다
+- `newsVolume`이 필터 후 기준으로 바뀌었으므로 기준선(`NewsDailyLog`)은 새로 쌓여야 한다

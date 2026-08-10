@@ -205,6 +205,8 @@ function setup() {
   const props = PropertiesService.getScriptProperties();
   const out = [];
 
+  migrateAlertLog_();
+
   setupTrigger();
   out.push('✅ 자동 갱신 트리거 등록됨 (' + REFRESH_INTERVAL_MIN + '분마다)');
 
@@ -314,7 +316,7 @@ const SECTOR_HEADERS = [
   'id', 'name', 'icon', 'netFlow', 'flowChangePct', 'flowDate',
   'avgChangePct', 'krChangePct', 'usChangePct',
   'newsVolume', 'newsKr', 'newsUs', 'newsChangePct', 'newsBaselineReady', 'stocksJson', 'updatedAt',
-  'frgnFlow', 'orgFlow', 'indiFlow', 'etfName',
+  'frgnFlow', 'orgFlow', 'indiFlow', 'etfName', 'newsRaw', 'newsItemsJson',
 ];
 
 function refreshAll() {
@@ -331,14 +333,14 @@ function refreshAll() {
     r.avgChangePct, r.krChangePct, r.usChangePct,
     r.newsVolume, r.newsKr, r.newsUs, r.newsChangePct, r.newsBaselineReady,
     JSON.stringify(r.stocks), new Date().toISOString(),
-    r.frgnFlow, r.orgFlow, r.indiFlow, r.etfName,
+    r.frgnFlow, r.orgFlow, r.indiFlow, r.etfName, r.newsRaw, JSON.stringify(r.newsItems || []),
   ]));
 
   logDailySectorPct_(ss, results);
   logSectorDailyFromQuotes_(ss, quotes);
   invalidateHistoryCache_();
   detectDropEvents_(ss, results);
-  checkAlerts_(ss, results);
+  checkAlerts_(ss, results, quotes);
 }
 
 /* 모든 종목의 시세/수급 요청을 한 번에 병렬 실행한다.
@@ -506,6 +508,8 @@ function buildSectorSnapshot_(ss, sec, quotes) {
     newsUs: news.usCount,
     newsChangePct: newsBase.changePct,
     newsBaselineReady: newsBase.ready,
+    newsRaw: news.rawCount || 0,
+    newsItems: news.items || [],
     stocks,
   };
 }
@@ -594,8 +598,10 @@ function parseRssItems_(xml) {
     const t = raw.match(/<title>([\s\S]*?)<\/title>/);
     const d = raw.match(/<pubDate>([\s\S]*?)<\/pubDate>/);
     const l = raw.match(/<link>([\s\S]*?)<\/link>/);
+    const rawTitle = t ? t[1] : '';
     return {
-      title: t ? cleanHeadline_(t[1]) : '',
+      title: cleanHeadline_(rawTitle),
+      source: splitSource_(rawTitle),
       pubDate: d ? d[1].trim() : '',
       link: l ? l[1].trim() : '',
     };
@@ -603,12 +609,23 @@ function parseRssItems_(xml) {
 }
 
 /* 구글뉴스 제목은 "기사제목 - 매체명" 형태이고 HTML 엔티티가 섞여 있다. */
-function cleanHeadline_(s) {
+function decodeHeadline_(s) {
   let out = String(s).replace(/<!\[CDATA\[|\]\]>/g, '').trim();
   out = out.replace(/&quot;/g, '"').replace(/&#39;/g, "'")
            .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-  out = out.replace(/<[^>]+>/g, '');
-  return out.replace(/\s+-\s+[^-]{2,30}$/, '').trim();
+  return out.replace(/<[^>]+>/g, '').trim();
+}
+
+/* 구글뉴스 제목은 "기사제목 - 매체명" 형태다 */
+const SOURCE_SUFFIX = /\s+-\s+([^-]{2,30})$/;
+
+function cleanHeadline_(s) {
+  return decodeHeadline_(s).replace(SOURCE_SUFFIX, '').trim();
+}
+
+function splitSource_(s) {
+  const m = decodeHeadline_(s).match(SOURCE_SUFFIX);
+  return m ? m[1].trim() : '';
 }
 
 function countWithin24h_(items) {
@@ -619,29 +636,116 @@ function countWithin24h_(items) {
   });
 }
 
-/* 국내/해외 피드를 각각 받아 24시간 건수를 합산한다. */
+/* 증시와 무관한 기사가 섞이면 언급량이 뉴스 신호가 아니라 잡음이 된다.
+   제목에 시장·주가 관련 단어가 하나도 없으면 집계에서 뺀다. */
+const MARKET_WORDS_KR = ['주가', '주식', '증시', '코스피', '코스닥', '상장', '실적', '어닝',
+  '매수', '매도', '급등', '급락', '강세', '약세', '목표주가', '수주', '공시', '투자', '수출',
+  '영업이익', '적자', '흑자', '시총', '외국인', '기관', '반등', '조정'];
+const MARKET_WORDS_EN = ['stock', 'shares', 'nasdaq', 'earnings', 'revenue', 'profit', 'guidance',
+  'rally', 'plunge', 'surge', 'slump', 'analyst', 'upgrade', 'downgrade', 'market cap',
+  'investor', 'outlook', 'forecast', 'buy rating', 'price target'];
+
+function isMarketRelated_(title, lang) {
+  const t = String(title || '');
+  const words = lang === 'en' ? MARKET_WORDS_EN : MARKET_WORDS_KR;
+  const hay = lang === 'en' ? t.toLowerCase() : t;
+  for (let i = 0; i < words.length; i++) {
+    if (hay.indexOf(words[i]) > -1) return true;
+  }
+  return false;
+}
+
+/* 같은 사건을 여러 매체가 쓰면 제목이 거의 같지만 [속보] 같은 말머리나
+   어미가 달라 앞부분 비교로는 못 잡는다. 단어 집합이 얼마나 겹치는지로 판단한다. */
+const NEWS_DUP_RATIO = 0.6;
+
+function newsTokens_(title) {
+  return String(title || '')
+    .toLowerCase()
+    .replace(/\[[^\]]*\]|【[^】]*】|<[^>]*>/g, ' ')
+    .replace(/[^0-9a-z가-힣]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w.length >= 2);
+}
+
+function tokenOverlap_(a, b) {
+  if (!a.length || !b.length) return 0;
+  const inA = {};
+  a.forEach((w) => { inA[w] = true; });
+  const counted = {};
+  let inter = 0;
+  b.forEach((w) => {
+    if (inA[w] && !counted[w]) { counted[w] = true; inter++; }
+  });
+  const uniqA = Object.keys(inA).length;
+  const uniqB = b.filter((w, i) => b.indexOf(w) === i).length;
+  const union = uniqA + uniqB - inter;
+  return union ? inter / union : 0;
+}
+
+function dedupeNews_(items) {
+  const kept = [];
+  const keptTokens = [];
+  items.forEach((it) => {
+    const tokens = newsTokens_(it.title);
+    if (!tokens.length) return;
+    for (let i = 0; i < keptTokens.length; i++) {
+      if (tokenOverlap_(keptTokens[i], tokens) >= NEWS_DUP_RATIO) return;
+    }
+    kept.push(it);
+    keptTokens.push(tokens);
+  });
+  return kept;
+}
+
+/* 뉴스는 10분마다 받을 이유가 없다. 1시간 캐시로 요청을 6분의 1로 줄인다. */
+const NEWS_CACHE_SEC = 3600;
+
 function fetchNewsVolume_(sec) {
+  const cache = CacheService.getScriptCache();
+  const ck = 'news|' + sec.id;
+  try {
+    const hit = cache.get(ck);
+    if (hit) return JSON.parse(hit);
+  } catch (e) { /* 무시 */ }
+
+  const out = fetchNewsVolumeFresh_(sec);
+  try { cache.put(ck, JSON.stringify(out), NEWS_CACHE_SEC); } catch (e) { /* 무시 */ }
+  return out;
+}
+
+/* 국내/해외 피드를 각각 받아 24시간 건수를 센다.
+   증시 무관 기사와 중복 기사를 뺀 뒤 세므로 예전보다 건수가 작게 나온다. */
+function fetchNewsVolumeFresh_(sec) {
   const queries = [];
   if (sec.newsQueryKr) queries.push({ url: googleNewsUrl_(sec.newsQueryKr, 'ko'), lang: 'ko' });
   if (sec.newsQueryUs) queries.push({ url: googleNewsUrl_(sec.newsQueryUs, 'en'), lang: 'en' });
-  if (!queries.length) return { count: 0, krCount: 0, usCount: 0, items: [] };
+  const empty = { count: 0, krCount: 0, usCount: 0, rawCount: 0, items: [] };
+  if (!queries.length) return empty;
 
   let responses;
   try {
     responses = UrlFetchApp.fetchAll(queries.map((q) => ({ url: q.url, muteHttpExceptions: true })));
   } catch (e) {
-    return { count: 0, krCount: 0, usCount: 0, items: [] };
+    return empty;
   }
 
   let krCount = 0;
   let usCount = 0;
+  let rawCount = 0;
   let recent = [];
+
   responses.forEach((res, i) => {
     if (!res) return;
+    const lang = queries[i].lang;
     try {
       const fresh = countWithin24h_(parseRssItems_(res.getContentText()));
-      if (queries[i].lang === 'ko') krCount = fresh.length; else usCount = fresh.length;
-      recent = recent.concat(fresh);
+      rawCount += fresh.length;
+      const kept = dedupeNews_(fresh.filter((it) => isMarketRelated_(it.title, lang)))
+        .map((it) => ({ title: it.title, source: it.source, link: it.link, pubDate: it.pubDate, lang: lang }));
+      if (lang === 'ko') krCount = kept.length; else usCount = kept.length;
+      recent = recent.concat(kept);
     } catch (e) { /* 한쪽 피드 실패는 무시 */ }
   });
 
@@ -650,16 +754,11 @@ function fetchNewsVolume_(sec) {
     count: krCount + usCount,
     krCount: krCount,
     usCount: usCount,
-    items: recent.slice(0, 5),
+    rawCount: rawCount,
+    items: recent.slice(0, 6),
   };
 }
 
-function stripTags_(s) {
-  return String(s).replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-}
-
-/* 24시간 언급량을 직전 N일 일평균과 비교한다.
-   기준선이 쌓이기 전에는 억지로 숫자를 만들지 않고 ready=false로 알린다. */
 function computeNewsChange_(ss, sectorId, count) {
   const sheet = getOrCreateSheet_(ss, 'NewsDailyLog', ['date', 'sectorId', 'count']);
   const today = todayStr_();
@@ -1340,6 +1439,8 @@ function getDashboard_() {
       newsUs: Number(o.newsUs) || 0,
       newsChangePct: Number(o.newsChangePct) || 0,
       newsBaselineReady: o.newsBaselineReady === true || o.newsBaselineReady === 'TRUE',
+      newsRaw: Number(o.newsRaw) || 0,
+      newsItems: safeParseJson_(o.newsItemsJson, []),
       stocks: safeParseJson_(o.stocksJson, []),
     };
   });
@@ -1363,7 +1464,7 @@ function getDashboard_() {
     .sort((a, b) => (a.date < b.date ? 1 : -1))
     .slice(0, 20);
 
-  const alertSheet = getOrCreateSheet_(ss, 'AlertLog', ['date', 'sectorId', 'sectorName', 'type', 'sentAt', 'body']);
+  const alertSheet = getOrCreateSheet_(ss, 'AlertLog', ALERT_HEADERS);
   const alerts = normalizeDateCol_(alertSheet.getDataRange().getValues().slice(1), 0)
     .map((r) => ({
       id: r[0] + '|' + r[1] + '|' + r[3],
@@ -1373,6 +1474,11 @@ function getDashboard_() {
       type: r[3],
       at: r[4] ? new Date(r[4]).toISOString() : '',
       body: String(r[5] || ''),
+      direction: String(r[6] || 'caution'),
+      headline: String(r[7] || ''),
+      source: String(r[8] || ''),
+      link: String(r[9] || ''),
+      basis: safeParseJson_(r[10], []),
     }))
     .sort((a, b) => (a.at < b.at ? 1 : -1))
     .slice(0, 30);
@@ -1570,11 +1676,44 @@ function kakaoDisconnect_() {
 /* 알림은 카카오 연결 여부와 무관하게 항상 시트에 기록한다.
    웹 대시보드가 이 기록을 그대로 읽어 화면에 띄우고,
    카카오가 연결돼 있을 때만 추가로 카톡을 보낸다. */
-function checkAlerts_(ss, sectorResults) {
+/* 알림은 "무슨 일이 있었나 / 왜 떴나 / 좋은 신호인가"가 한눈에 보여야 한다.
+   예전에는 괴리 %p만 던져서 사라는 건지 팔라는 건지 알 수 없었다.
+   AlertLog 스키마: [date, sectorId, sectorName, type, sentAt, body, direction, headline, source, link, basisJson] */
+const ALERT_HEADERS = ['date', 'sectorId', 'sectorName', 'type', 'sentAt', 'body',
+  'direction', 'headline', 'source', 'link', 'basisJson'];
+
+const ALERT_KIND = {
+  inflow:  { label: '자금 유입',  icon: '💰', direction: 'positive' },
+  outflow: { label: '자금 이탈',  icon: '🚪', direction: 'negative' },
+  drop:    { label: '급락',       icon: '📉', direction: 'caution' },
+  turn_buy:  { label: '수급 전환(매수)', icon: '🔄', direction: 'positive' },
+  turn_sell: { label: '수급 전환(매도)', icon: '🔄', direction: 'negative' },
+};
+
+/* 연속 순매도 뒤 순매수로 돌아선 날을 잡는다. 방향이 바뀌는 지점이
+   단순 크기보다 의미 있는 경우가 많다. */
+function detectFlowTurn_(hist) {
+  if (!hist || hist.length < 4) return null;
+  const net = (h) => h.frgnFlow + h.orgFlow;
+  const today = net(hist[0]);
+  if (today === 0) return null;
+
+  let streak = 0;
+  for (let i = 1; i < hist.length; i++) {
+    const v = net(hist[i]);
+    if (today > 0 && v < 0) streak++;
+    else if (today < 0 && v > 0) streak++;
+    else break;
+  }
+  if (streak < 3) return null;
+  return { streak: streak, today: today, kind: today > 0 ? 'turn_buy' : 'turn_sell' };
+}
+
+function checkAlerts_(ss, sectorResults, quotes) {
   const props = PropertiesService.getScriptProperties();
   const kakaoOn = props.getProperty(K_ALERTS_ON) === 'true' && !!props.getProperty(K_REFRESH);
 
-  const sheet = getOrCreateSheet_(ss, 'AlertLog', ['date', 'sectorId', 'sectorName', 'type', 'sentAt', 'body']);
+  const sheet = getOrCreateSheet_(ss, 'AlertLog', ALERT_HEADERS);
   const today = todayStr_();
   const sent = {};
   normalizeDateCol_(sheet.getDataRange().getValues().slice(1), 0).forEach((r) => {
@@ -1584,29 +1723,63 @@ function checkAlerts_(ss, sectorResults) {
   const queue = [];
 
   sectorResults.forEach((r) => {
+    const news = topNewsFor_(r);
+
+    // 1) 급락 — 판단이 가장 명확하다
     if (r.avgChangePct <= DROP_THRESHOLD_PCT && !sent[r.id + '|drop']) {
-      const lines = ['📉 [' + r.name + '] ' + r.avgChangePct + '% 하락'];
-      if (hasFlow_(r)) lines.push('자금 평소 대비 ' + fmtSigned_(r.flowChangePct) + '%');
-      const headline = latestHeadline_(ss, today, r.id);
-      if (headline) lines.push(headline);
-      queue.push({ sectorId: r.id, sectorName: r.name, type: 'drop', body: lines.join('\n') });
+      queue.push(buildAlert_('drop', r, news, [
+        ['섹터 평균 등락률', fmtSigned_(r.avgChangePct) + '%', '기준 ' + DROP_THRESHOLD_PCT + '% 이하'],
+        hasFlow_(r) ? ['외국인·기관 수급', fmtFlowEok_(r.netFlow), '평소 대비 ' + fmtSigned_(r.flowChangePct) + '%'] : null,
+      ]));
     }
 
-    const divergence = +(r.flowChangePct - r.newsChangePct).toFixed(1);
-    if (hasFlow_(r) && r.newsBaselineReady && Math.abs(divergence) >= SIGNAL_THRESHOLD && !sent[r.id + '|signal']) {
-      queue.push({
-        sectorId: r.id, sectorName: r.name, type: 'signal',
-        body: (divergence > 0 ? '📈' : '⚠️') + ' [' + r.name + '] 선제 신호 ' + (divergence > 0 ? '+' : '') + divergence + '%p\n'
-            + '자금 ' + fmtSigned_(r.flowChangePct) + '% / 뉴스 ' + fmtSigned_(r.newsChangePct) + '% (평소 대비)\n'
-            + '수급 기준일 ' + (r.flowDate || '-'),
-      });
+    // 2) 자금 유입/이탈 — 평소 수급 규모로 정규화한 이례도
+    if (hasFlow_(r) && Math.abs(r.flowChangePct) >= SIGNAL_THRESHOLD) {
+      const kind = r.flowChangePct > 0 ? 'inflow' : 'outflow';
+      if (!sent[r.id + '|' + kind]) {
+        queue.push(buildAlert_(kind, r, news, [
+          ['외국인·기관 순매매', fmtFlowEok_(r.netFlow), '평소 대비 ' + fmtSigned_(r.flowChangePct) + '%'],
+          ['외국인', fmtFlowEok_(r.frgnFlow), ''],
+          ['기관', fmtFlowEok_(r.orgFlow), ''],
+          ['개인', fmtFlowEok_(r.indiFlow), '개인은 보통 반대로 움직인다'],
+          ['기준일', r.flowDate || '-', '수급은 전 거래일 확정치'],
+        ]));
+      }
+    }
+
+    // 3) 수급 전환 — 연속 매도/매수가 끊긴 날
+    const turn = sectorTurn_(r, quotes);
+    if (turn && !sent[r.id + '|' + turn.kind]) {
+      queue.push(buildAlert_(turn.kind, r, news, [
+        ['직전 흐름', turn.streak + '거래일 연속 ' + (turn.kind === 'turn_buy' ? '순매도' : '순매수'), ''],
+        ['오늘', fmtFlowEok_(turn.today), turn.kind === 'turn_buy' ? '매수로 전환' : '매도로 전환'],
+        ['기준일', r.flowDate || '-', ''],
+      ]));
     }
   });
 
   queue.slice(0, MAX_ALERTS_PER_RUN).forEach((q) => {
-    sheet.appendRow([today, q.sectorId, q.sectorName, q.type, new Date().toISOString(), q.body]);
+    sheet.appendRow([today, q.sectorId, q.sectorName, q.type, new Date().toISOString(), q.body,
+      q.direction, q.headline, q.source, q.link, JSON.stringify(q.basis)]);
     if (kakaoOn) sendKakao_(q.body);
   });
+}
+
+/* 섹터 안의 종목 수급 이력을 합쳐 전환 여부를 본다 */
+function sectorTurn_(r, quotes) {
+  if (!quotes || !quotes.krStocks || !hasFlow_(r)) return null;
+  const list = quotes.krStocks[r.id] || [];
+  if (!list.length) return null;
+
+  const merged = [];
+  list.forEach((s) => {
+    (quotes.krTrend[s.code] || []).forEach((h, i) => {
+      if (!merged[i]) merged[i] = { frgnFlow: 0, orgFlow: 0 };
+      merged[i].frgnFlow += h.frgnFlow;
+      merged[i].orgFlow += h.orgFlow;
+    });
+  });
+  return detectFlowTurn_(merged);
 }
 
 function hasFlow_(r) {
@@ -1615,6 +1788,35 @@ function hasFlow_(r) {
 
 function fmtSigned_(n) {
   return (n > 0 ? '+' : '') + n;
+}
+
+function fmtFlowEok_(n) {
+  const v = Math.round(Number(n) || 0);
+  return (v >= 0 ? '+' : '') + v.toLocaleString('en-US') + '억';
+}
+
+function topNewsFor_(r) {
+  const items = (r.newsItems || []);
+  return items.length ? items[0] : null;
+}
+
+function buildAlert_(kind, r, news, basisRaw) {
+  const meta = ALERT_KIND[kind];
+  const basis = (basisRaw || []).filter(Boolean).map((b) => ({ label: b[0], value: b[1], note: b[2] || '' }));
+
+  const lines = [meta.icon + ' [' + r.name + '] ' + meta.label];
+  basis.slice(0, 3).forEach((b) => lines.push(b.label + ' ' + b.value + (b.note ? ' (' + b.note + ')' : '')));
+  if (news && news.title) lines.push('· ' + news.title + (news.source ? ' — ' + news.source : ''));
+
+  return {
+    sectorId: r.id, sectorName: r.name, type: kind,
+    direction: meta.direction,
+    body: lines.join('\n'),
+    headline: news ? news.title : '',
+    source: news ? news.source : '',
+    link: news ? news.link : '',
+    basis: basis,
+  };
 }
 
 function latestHeadline_(ss, today, sectorId) {
@@ -1679,6 +1881,16 @@ function historyCacheVersion_() {
 /* 타임스탬프를 쓰면 같은 밀리초 안에 두 번 무효화될 때 값이 그대로라 캐시가 안 비워진다 */
 function invalidateHistoryCache_() {
   try { CacheService.getScriptCache().put('hver', Utilities.getUuid(), 21600); } catch (e) { /* 무시 */ }
+}
+
+/* 알림 스키마가 6열 → 11열로 늘었다. 옛 행은 근거·출처가 없어 화면에서
+   본문만 보여주게 되므로, 헤더만 새로 맞추고 기존 행은 그대로 둔다. */
+function migrateAlertLog_() {
+  const ss = getDb_();
+  const sheet = getOrCreateSheet_(ss, 'AlertLog', ALERT_HEADERS);
+  const width = sheet.getLastColumn();
+  if (width >= ALERT_HEADERS.length) return;
+  sheet.getRange(1, 1, 1, ALERT_HEADERS.length).setValues([ALERT_HEADERS]);
 }
 
 function hasEtfHoldings_(ss) {

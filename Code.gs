@@ -1740,7 +1740,7 @@ const TARGET_W = {
   resilience: { slopeFloor: -0.50, slopeCap: 0.50, ddBonus: 0.35 },  // 일간 변동성 배수
 
   topSectors: 3,                                 // Phase 2를 적용할 상위 섹터 수
-  pages: 9,                                      // 10거래일 × 9 = 90거래일이면 vol60까지 넉넉
+  pages: 7,                                      // vol60에 61거래일이면 되므로 70일이면 충분 (화면 대기시간을 줄인다)
 };
 
 const TARGET_CACHE_SEC = 3600;

@@ -196,6 +196,7 @@ function render() {
   if (currentPage === 'flow') renderFlowPage(el);
   else if (currentPage === 'alerts') renderAlertsPage(el);
   else if (currentPage === 'risk') renderRiskPage(el);
+  else if (currentPage === 'experiment') renderTargetPage(el);
   else if (currentPage === 'trend') renderTrendPage(el);
   else if (currentPage === 'history') renderHistoryPage(el);
   else if (currentPage === 'signal') renderSignalPage(el);
@@ -546,6 +547,136 @@ function renderRiskPage(el) {
       결과입니다. 예언이 아니라 과거 기록입니다.<br>
       구간 경계는 고정값이라 장 전체가 흔들리면 대부분 섹터가 '높음'에 몰립니다.
       그럴 땐 밴드보다 <b>섹터 간 순서와 변동성 숫자</b>를 보세요.
+    </div>
+  `;
+}
+
+/* ============================================================
+   실험 · 매수 관점 스코어 (검증 탈락 — 기록용)
+   ============================================================ */
+
+/* 이 화면은 "이 방법은 안 통했다"를 남겨두는 곳이다.
+   지우지 않고 남기는 이유는, 같은 아이디어를 나중에 또 떠올렸을 때
+   이미 해봤고 왜 안 됐는지 바로 확인하기 위해서다.
+   매수 후보로 읽히지 않도록 경고를 맨 위에 크게 둔다. */
+
+let TARGET = null;
+let targetState = 'idle';
+
+async function fetchTarget(onLoading) {
+  if (TARGET) { targetState = 'ready'; return; }
+  if (!isConfigured()) { targetState = 'error'; return; }
+  targetState = 'loading';
+  if (onLoading) onLoading();
+  try {
+    const res = await fetch(gasUrl('target'));
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    TARGET = data;
+    targetState = 'ready';
+  } catch (err) {
+    targetState = 'error';
+  }
+}
+
+function expBar(pct, cls) {
+  const w = Math.max(0, Math.min(100, pct || 0));
+  return `<div class="zbar"><div class="zbar-fill ${cls}" style="left:0;width:${w}%"></div></div>`;
+}
+
+function renderTargetPage(el) {
+  if (targetState === 'loading' || targetState === 'idle') {
+    el.innerHTML = `<div class="section-title">실험 · 매수 관점 스코어</div>
+      <div class="empty-state">
+        <div class="empty-icon">🧪</div>
+        62개 종목의 70거래일 이력을 새로 받는 중이에요.<br>
+        처음 열면 <b>2~3분</b> 걸리고, 그 뒤 한 시간은 바로 뜹니다.
+      </div>`;
+    return;
+  }
+  if (targetState === 'error' || !TARGET) {
+    el.innerHTML = `<div class="section-title">실험 · 매수 관점 스코어</div>
+      <div class="empty-state"><div class="empty-icon">⚠️</div>
+        불러오지 못했어요. 시간이 오래 걸려 끊겼을 수 있으니 다시 시도해주세요.</div>`;
+    return;
+  }
+
+  const bt = TARGET.backtest || {};
+  const sectorCards = (TARGET.sectors || []).map((s) => `
+    <div class="card score-card">
+      <div class="score-head">
+        <div class="score-rank">${s.rank}</div>
+        <div class="score-name">${s.icon} ${s.name}</div>
+        <div class="score-value">${s.score.toFixed(1)}</div>
+      </div>
+      <div class="score-factors">
+        <div class="zrow"><span class="zlabel">변동성 압축</span>${expBar(s.squeeze, 'band-low')}<span class="zval">${s.squeeze.toFixed(0)}</span></div>
+        <div class="zrow"><span class="zlabel">수급 다이버전스</span>${expBar(s.divergence, 'band-low')}<span class="zval">${s.divergence.toFixed(0)}</span></div>
+        <div class="zrow"><span class="zlabel">패널티</span>${expBar(s.penalty, 'band-high')}<span class="zval">${s.penalty ? '−' + s.penalty.toFixed(0) : '0'}</span></div>
+      </div>
+      <div class="score-detail">
+        vol20/vol60 ${s.volRatio}${s.expanding ? ' (발산)' : ''} ·
+        최근 60일 낙폭 <b>${s.dd60}%</b> ·
+        20일 수급 ${fmtFlow(s.net20)}
+      </div>
+    </div>`).join('');
+
+  const rows = (TARGET.targets || []).slice(0, 15).map((t, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td><b>${t.name}</b><div class="exp-sub">${t.sectorName}</div></td>
+      <td class="num">${t.buyScore.toFixed(1)}</td>
+      <td class="num">${t.detail.smart.toFixed(0)}</td>
+      <td class="num">${t.detail.resilience.toFixed(0)}</td>
+      <td class="num">${t.detail.dd60 == null ? '—' : t.detail.dd60 + '%'}</td>
+    </tr>`).join('');
+
+  el.innerHTML = `
+    <div class="warn-box">
+      <div class="warn-title">🧪 검증에서 탈락한 실험입니다 — 매수 후보가 아닙니다</div>
+      <div class="warn-body">
+        아래 점수가 높다고 오르지 않습니다. 오히려 <b>이후에 더 빠졌습니다</b>.<br>
+        지우지 않고 남겨둔 건, 같은 아이디어를 다시 떠올렸을 때 이미 해봤다는 걸
+        바로 확인하기 위해서입니다.
+      </div>
+    </div>
+
+    <div class="card exp-verdict">
+      <div class="card-title">백테스트 결과 · 코스피 185종목 3.2년</div>
+      <div class="exp-grid">
+        <div><span class="exp-k">이후 20일 수익률</span><span class="exp-v bad">IC ${bt.fwdReturnIC}</span></div>
+        <div><span class="exp-k">손익비 (수익÷변동성)</span><span class="exp-v bad">IC ${bt.fwdSharpeIC}</span></div>
+        <div><span class="exp-k">이후 20일 최대낙폭</span><span class="exp-v warn">IC +${bt.fwdDrawdownIC}</span></div>
+        <div><span class="exp-k">위험도(vol60) 대비 증분</span><span class="exp-v bad">+${bt.incrementalOverVol60}</span></div>
+      </div>
+      <div class="exp-why">
+        <b>왜 안 됐나</b> — 수급 다이버전스가 "최근 60일에 10% 이상 빠졌을 것"을 필수 조건으로 겁니다.
+        저가 매수 기회를 잡으려던 건데, 이 데이터에서 가장 확실하게 검증된 사실이
+        <b>"많이 빠진 종목은 앞으로도 더 빠진다"</b>였습니다. 그래서 저가 매수 필터가 아니라
+        위험 종목 필터로 작동했습니다. "기관이 사고 있다"는 조건이 이걸 상쇄해줘야 했는데,
+        수급의 수익률 예측력은 108개 가설에서 전부 0으로 나왔습니다.<br>
+        점수 상위 1/3이 하위 1/3보다 이후 20일 최대낙폭이 <b>1.72%p 더 컸습니다</b>
+        (홀드아웃 ${bt.holdout}, 시점의 81%에서 같은 방향).
+      </div>
+    </div>
+
+    <div class="section-title">Phase 1 · 섹터 국면 점수 · ${TARGET.asOf} 기준</div>
+    ${sectorCards}
+
+    <div class="section-title">Phase 2 · 상위 3개 섹터의 종목 점수</div>
+    <div class="table-wrap">
+      <table class="exp-table">
+        <thead><tr><th>#</th><th>종목</th><th class="num">최종</th><th class="num">스마트머니</th><th class="num">회복력</th><th class="num">낙폭</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+
+    <div class="signal-note">
+      섹터 40% + 종목 60%로 결합한 0~100점입니다.
+      섹터 = 변동성 압축 40% + 수급 다이버전스 60% − 패널티,
+      종목 = 스마트머니 안정성 65% + 낙폭 회복력 35%.<br>
+      가중치는 GAS의 <code>TARGET_W</code> 상수에 모여 있습니다.
+      재검증하려면 학습 구간에서만 조정하고 홀드아웃은 새 데이터가 쌓인 뒤 한 번만 여세요.
     </div>
   `;
 }
@@ -1360,6 +1491,9 @@ function init() {
       if (currentPage === 'trend' && trendState !== 'ready') {
         await fetchTrend(render);
         render();
+      }
+      if (currentPage === 'experiment') {
+        await fetchTarget(render);
       }
       if (currentPage === 'risk') {
         await fetchRisk(render);

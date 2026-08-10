@@ -509,6 +509,26 @@ a.alert-news-title:hover { text-decoration: underline; }
   font-size: 12px; font-weight: 800; color: #fff;
   padding: 3px 10px; border-radius: 999px;
 }
+.exp-verdict { padding: 16px 18px; margin-bottom: 14px; }
+.exp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin-top: 10px; }
+.exp-grid > div { display: flex; flex-direction: column; gap: 2px; }
+.exp-k { font-size: 11.5px; color: var(--text-faint); }
+.exp-v { font-size: 14px; font-weight: 800; }
+.exp-v.bad { color: var(--text-sub); }
+.exp-v.warn { color: var(--danger); }
+.exp-why {
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+  font-size: 12.5px; color: var(--text-sub); line-height: 1.7;
+}
+.exp-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.exp-table th {
+  text-align: left; font-size: 11.5px; color: var(--text-faint);
+  font-weight: 700; padding: 8px 10px; border-bottom: 1px solid var(--border);
+}
+.exp-table td { padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.exp-table .num, .exp-table th.num { text-align: right; }
+.exp-sub { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+.table-wrap { overflow-x: auto; }
 .risk-overall { padding: 14px 18px; margin-bottom: 12px; }
 .risk-overall-line { font-size: 14px; font-weight: 800; }
 .risk-overall-sub { margin-top: 4px; font-size: 12px; color: var(--text-faint); }

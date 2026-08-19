@@ -1,0 +1,34 @@
+{
+  "expo": {
+    "name": "블박신고",
+    "slug": "dashcam-report-mvp",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0F172A"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.dashcamreportmvp",
+      "infoPlist": {
+        "LSApplicationQueriesSchemes": [
+          "safereport",
+          "safetyreport",
+          "safepeople",
+          "itms-apps"
+        ]
+      }
+    },
+    "android": {
+      "package": "com.example.dashcamreportmvp",
+      "adaptiveIcon": {
+        "backgroundColor": "#0F172A"
+      }
+    },
+    "plugins": [
+      "./plugins/withExternalAppQueries"
+    ]
+  }
+}
